@@ -10,7 +10,7 @@ function ready() {
   if (!L || !L.audio) { setTimeout(ready, 300); return; }
   talk({
     name: 'loft',
-    play(s) { L.play(s.name); },
+    play(s) { L.play(s.name, { announced: true }); },   // (Oasis already said its name: the announcer doesn't say it again)
     playing() {
       if (!L.audio.playing) return null;
       const name = $('np-title').textContent;
@@ -21,7 +21,8 @@ function ready() {
     next() { key('n'); },
     prev() { key('p'); },
     shuffle() { key('s'); },
-    dislike() { key('x'); },
+    dislike() { L.dislike(); },
+    timer(min) { L.sleep(min); },   // (X marks a chill now; never press it for this)
     lyrics(on) { if (on === document.body.classList.contains('no-lyrics')) key('t'); },
     volume(dv) {
       const el = $('vol');
@@ -32,7 +33,7 @@ function ready() {
     drop() {
       const t = L.audio.rawTime(), d = ((L.map && L.map.drops) || []).find((x) => x.t > t + 2);
       if (!d) return 'No drop left in this one.';
-      L.seek(Math.max(0, d.t - 6));
+      L.seek(Math.max(t, d.t - 6));   // (never backwards)
       return 'Hold on. Six seconds.';
     },
   });

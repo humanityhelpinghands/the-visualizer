@@ -97,13 +97,13 @@ export class Conductor {
     const bi = bsearch(m.beats, t);
     f.beatIdx = bi;
     if (bi >= 0 && bi + 1 < m.beats.length) {
-      f.beatPhase = (t - m.beats[bi]) / (m.beats[bi + 1] - m.beats[bi]);
-      f.beatLen = m.beats[bi + 1] - m.beats[bi];
+      f.beatLen = Math.max(1e-3, m.beats[bi + 1] - m.beats[bi]);   // (two beats on one frame must not make NaN)
+      f.beatPhase = (t - m.beats[bi]) / f.beatLen;
     } else f.beatPhase = bi >= 0 ? Math.min(1, (t - m.beats[bi]) / f.beatLen) : 0;
     const di = bsearch(m.downbeats, t);
     f.barIdx = di;
     if (di >= 0 && di + 1 < m.downbeats.length) {
-      f.barLen = m.downbeats[di + 1] - m.downbeats[di];
+      f.barLen = Math.max(1e-3, m.downbeats[di + 1] - m.downbeats[di]);
       f.barPhase = (t - m.downbeats[di]) / f.barLen;
     } else f.barPhase = di >= 0 ? Math.min(1, (t - m.downbeats[di]) / f.barLen) : 0;
     f.beatInBar = bi >= 0 ? (((bi - (this.db0 || 0)) % 4) + 4) % 4 : 0;

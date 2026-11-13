@@ -59,19 +59,28 @@ CURATED = [
 ]
 
 
+def phonemizer_once():
+    """One espeak backend for the voice's whole life. phonemizer.phonemize builds a new one per call, and each copies espeak-ng.dll
+    into its own temp folder that stays until the process exits (696 of them in %TEMP% on 2026-11-01)."""
+    from phonemizer.backend import EspeakBackend
+    from phonemizer.separator import default_separator
+    backend = EspeakBackend("en-us", preserve_punctuation=True, with_stress=True)
+    return lambda words: backend.phonemize(words, separator=default_separator, strip=False)
+
+
 class KokoroVoice:
     def __init__(self, threads=6):
         import onnxruntime as ort
         from kokoro_onnx.tokenizer import Tokenizer
-        import phonemizer
 
         so = ort.SessionOptions()
         so.intra_op_num_threads = threads      # leave cores for the browser
         so.inter_op_num_threads = 1
         self.sess = ort.InferenceSession(MODEL, so, providers=["CPUExecutionProvider"])
         self.voices = np.load(VOICES)
+        self._packs = {}        # voice name -> its array (the .npz re-reads and unzips it on every index)
         self.tok = Tokenizer()
-        self._phonemize = phonemizer.phonemize
+        self._phonemize = phonemizer_once()
         self.lock = threading.Lock()
         self.cache = OrderedDict()
 
@@ -87,8 +96,14 @@ class KokoroVoice:
                 raise ValueError("unknown voice: %s" % name)
             parts.append((name, float(w) if w else 1.0))
         total = sum(w for _, w in parts) or 1.0
-        pack = sum(self.voices[name] * (w / total) for name, w in parts)
+        pack = sum(self._pack(name) * (w / total) for name, w in parts)
         return pack[min(n_tokens, len(pack) - 1)].astype(np.float32)
+
+    def _pack(self, name):
+        hit = self._packs.get(name)
+        if hit is None:
+            hit = self._packs[name] = self.voices[name]
+        return hit
 
     def say(self, text, voice=DEFAULT_VOICE, speed=0.95):
         text = " ".join(text.split())
@@ -102,7 +117,7 @@ class KokoroVoice:
                 return hit
             words = text.split(" ")
             # Phonemize word by word: we then know exactly which tokens are whose.
-            phon = self._phonemize(words, "en-us", preserve_punctuation=True, with_stress=True)
+            phon = self._phonemize(words)
             phon = [fix_word(w, p) for w, p in zip(words, phon)]
             vocab = self.tok.vocab
             space = vocab[" "]

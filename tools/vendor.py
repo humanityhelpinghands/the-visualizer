@@ -12,7 +12,7 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VENDOR = os.path.join(ROOT, "vendor")
-THREE = "https://cdn.jsdelivr.net/npm/three@0.170.0/"
+THREE = "https://cdn.jsdelivr.net/npm/three@0.186.0/"
 ENTRY = [
     "build/three.module.js",
     "examples/jsm/misc/GPUComputationRenderer.js",

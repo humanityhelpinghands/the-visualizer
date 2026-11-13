@@ -1,5 +1,4 @@
 # The Loft's phenomena, made in Blender (run headless):
-#   blender --background --factory-startup --python tools/blender/fx.py [-- only=fire,bolt,...]
 # Everything is greyscale (how much light or matter, never colour): the Loft colours it
 # live in the song's own colours, so the never-orange/gold/green rules always hold.
 #   fire.png      4x4 flipbook of a burst of volumetric fire and smoke (Cycles volume), for screams
@@ -132,7 +131,7 @@ if want('bolt'):
     out = nt.nodes.new('ShaderNodeOutputMaterial'); em = nt.nodes.new('ShaderNodeEmission'); em.inputs['Strength'].default_value = 6.0
     nt.links.new(em.outputs['Emission'], out.inputs['Surface'])
     frames = []
-    for i in range(4):
+    for _i in range(4):
         for o in list(sc.collection.objects):
             if o.type == 'CURVE': bpy.data.objects.remove(o)
         objs = []
@@ -180,7 +179,7 @@ if want('ripple'):
     c2, damp = 0.24, 0.996
     frames = []
     per = 9                                                         # simulation steps per frame
-    for f in range(steps):
+    for _f in range(steps):
         for _ in range(per):
             lap = np.roll(u, 1, 0) + np.roll(u, -1, 0) + np.roll(u, 1, 1) + np.roll(u, -1, 1) - 4 * u
             un = (2 * u - up + c2 * lap) * damp

@@ -1,6 +1,6 @@
 // Esc menu and graphics: no knobs. The Loft picks the sharpest quality this PC holds
-// with the card under half busy (the PC test), draws 60 frames a second (it looks the
-// same at 60, more only heats the card), and the heat watch steps quality down by
+// with the card at most about two-thirds busy (the PC test), draws up to 90 frames a second (smoothness is part of the
+// look, see below), and the heat watch steps quality down by
 // itself if the card ever runs hot. Optimal is the default; there is nothing to set.
 export const QUALITY = [
   { id: 'low', name: 'LOW', scale: 0.75, note: 'Drawn below screen size. Softest, coolest.' },
@@ -12,9 +12,13 @@ export const QUALITY = [
 // hooks: { prefs, applyScale(scale), setCap(fps), uncap(on), fps(), rendered(), gpu, benchScene() → restore() }
 export function makeSettings(hooks) {
   const { prefs } = hooks;
-  const cap = 60;
-  let best = prefs.get('bestQuality', 'ultra');   // what the PC test found (ULTRA until it says otherwise)
-  if (!QUALITY.some((q) => q.id === best)) best = 'ultra';
+  // (165 Hz: every 2nd refresh, 82.5 fps). At that pace a frame has 12 ms, which ULTRA's heaviest moments
+  // (13 ms) overrun, so the sharpness tops out at HIGH (1.25x, still sharper than the screen): the card
+  // stays about two-thirds busy, and the heat watch still steps down if it ever runs hot.
+  const cap = 90;
+  let best = prefs.get('bestQuality', 'high');   // what the PC test found (HIGH until it says otherwise)
+  if (!QUALITY.some((q) => q.id === best)) best = 'high';
+  if (best === 'ultra') best = 'high';
   let quality = best;                              // every visit starts at the best; the heat watch may step it down
   const apply = () => { hooks.applyScale(QUALITY.find((q) => q.id === quality).scale); hooks.setCap(cap); };
   apply();
@@ -24,9 +28,12 @@ export function makeSettings(hooks) {
   box.innerHTML = `
     <div class="menu-card">
       <div class="menu-main">
-        <div class="menu-title">THE LOFT</div>
-        <button class="menu-btn" data-go="resume">RESUME</button>
-        <button class="menu-btn" data-go="settings">SETTINGS</button>
+        <div class="menu-title">THE VISUALIZER</div>
+        <button class="menu-btn main" data-go="resume">Resume</button>
+        <button class="menu-btn" data-go="songs">Songs</button>
+        <div class="menu-pair"><button class="menu-btn" data-go="fullscreen">Full screen</button><button class="menu-btn" data-go="keys">Keys</button></div>
+        <button class="menu-btn" data-go="settings">Settings</button>
+        <button class="menu-btn ghost" data-go="exit">Exit</button>
       </div>
       <div class="menu-settings">
         <div class="menu-title">GRAPHICS</div>
@@ -34,11 +41,11 @@ export function makeSettings(hooks) {
         <div class="set-auto" id="q-now"></div>
         <div class="set-note" id="q-note"></div>
         <div class="set-live" id="set-live"></div>
-        <button class="menu-btn small" id="set-test">TEST MY PC</button>
+        <button class="menu-btn small" id="set-test">Test my PC</button>
         <div class="set-test" id="set-result"></div>
         <div class="set-label">OVER HOURS OF LISTENING</div>
         <div class="set-test" id="set-hist"></div>
-        <button class="menu-btn ghost" data-go="back">BACK</button>
+        <button class="menu-btn ghost" data-go="back">Back</button>
       </div>
     </div>`;
   document.body.appendChild(box);
@@ -46,9 +53,9 @@ export function makeSettings(hooks) {
 
   const paint = () => {
     const q = QUALITY.find((x) => x.id === quality);
-    $('#q-now').textContent = `${q.name} · 60 FPS · picked for you`;
+    $('#q-now').textContent = `${q.name} · UP TO ${cap} FPS`;
     $('#q-note').textContent = quality === best
-      ? `${q.note} The sharpest this PC holds with the card under half busy. If the card ever runs hot, the Loft steps down by itself.`
+      ? `Picked for you. ${q.note} The sharpest this PC holds smoothly with the card well short of flat out. If the card ever runs hot, the Visualizer steps down by itself.`
       : `Stepped down from ${QUALITY.find((x) => x.id === best).name} while something else uses the graphics card. It steps back up by itself once frames run smooth again.`;
   };
   let liveT = 0;
@@ -61,6 +68,14 @@ export function makeSettings(hooks) {
     const b = e.target.closest('button');
     if (!b) { if (e.target === box) close(); return; }
     if (b.dataset.go === 'resume') close();
+    else if (b.dataset.go === 'exit') {   // the same as the window's X: the music fades, the window and the server close
+      hooks.exit?.();
+      fetch('/api/quit', { method: 'POST', body: '{}' }).catch(() => {}).finally(() => setTimeout(() => window.close(), 600));
+    }
+    else if (['songs', 'keys', 'fullscreen'].includes(b.dataset.go)) {   // the same as the keys L, ? and F
+      close();
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: { songs: 'l', keys: '?', fullscreen: 'f' }[b.dataset.go] }));
+    }
     else if (b.dataset.go === 'settings') { box.classList.add('deep'); paint(); history(); }
     else if (b.dataset.go === 'back') box.classList.remove('deep');
     else if (b.id === 'set-test') test();
@@ -68,9 +83,8 @@ export function makeSettings(hooks) {
 
   // The test: each quality drawn for a few seconds while the graphics card's own
   // time per frame is measured. Its load is that time against the frame limit's
-  // budget (16.7 ms at 60). The pick is the sharpest that keeps the card under half
-  // loaded, so it idles between frames and stays cool instead of running flat out.
-  // Another Loft open on this PC (Claude's preview on another port, a second tab)
+  // budget (11.1 ms at 90). The pick is the sharpest (never ULTRA) that keeps the card
+  // under ~70% loaded, so it idles between frames and stays cool instead of running flat out.
   // shares the card and makes every number here look worse. Every Loft checks in with
   // its server every 10 s (cache/presence.json, shared by every server in this folder).
   const me = Math.random().toString(36).slice(2);
@@ -83,9 +97,9 @@ export function makeSettings(hooks) {
     if (testing) return;
     testing = true;
     const btn = $('#set-test'), out = $('#set-result'), gpu = hooks.gpu, budget = 1000 / cap, res = [];
-    btn.textContent = 'TESTING…'; btn.disabled = true;
+    btn.textContent = 'Testing…'; btn.disabled = true;
     const crowd = await countOthers();
-    out.textContent = 'Jumping to the loudest stretch of this song, the heaviest moment there is…';
+    out.textContent = 'Loading the scream in Welcome to the Funeral (3:00), the heaviest stretch…';
     const back = await hooks.benchScene();   // the test runs on the busiest moment there is
     try {
       for (const q of QUALITY) {
@@ -102,20 +116,26 @@ export function makeSettings(hooks) {
         for (let k = 0; k < 3; k++) { ms = Math.min(ms, hooks.drawTime(30)); await wait(80); }
         res.push({ q, ms, cpu: m.cpu, load: ms / budget });
       }
+    } catch (err) {   // a failed measurement must not leave the button stuck on TESTING… (testing stayed true for good)
+      out.textContent = 'The test could not finish: ' + err.message;
+      btn.textContent = 'Test again'; btn.disabled = false; testing = false;
+      return;
     } finally { hooks.uncap(false); back(); }
     if (res.some((r) => !isFinite(r.ms))) {
       out.innerHTML = "<p>This browser won't report the graphics card's timing, so the test can't measure it. HIGH is a safe pick for this PC.</p>";
       best = 'high';
     } else {
-      const fit = [...res].reverse().find((r) => r.load <= 0.5), pick = fit || res[0];
+      // at 90 fps the card may be up to ~70% busy (HIGH on an RX 6600 XT: about two-thirds); ULTRA's
+      // heaviest moments overrun a 90 fps frame, so it is never the pick
+      const fit = [...res].reverse().find((r) => r.q.id !== 'ultra' && r.load <= 0.72), pick = fit || res[0];
       const cpu = res.reduce((a, r) => a + r.cpu, 0) / res.length;
       out.innerHTML = res.map((r) => `<div class="${r === pick ? 'best' : ''}"><span>${r.q.name}</span><b>card ${Math.round(r.load * 100)}% busy</b></div>`).join('')
-        + `<p>${fit ? `Picked <b>${pick.q.name}</b>: the sharpest that keeps the card under half busy at ${cap} fps, so it stays cool.` : `Even LOW keeps the card over half busy at ${cap} fps, so LOW it is.`} The rest of each frame (${cpu.toFixed(1)} ms) is the browser working out the scene, the same at every quality.</p>`
-        + (crowd ? `<p><b>Another Loft is open on this PC</b> (${crowd} more), sharing the card, so these numbers read high. Close it and test again for the true picture.</p>` : '');
+        + `<p>${fit ? `Picked <b>${pick.q.name}</b>: the sharpest that keeps the card well short of flat out at up to ${cap} fps, so it stays cool.` : `Even LOW keeps the card busy at ${cap} fps, so LOW it is.`} The rest of each frame (${cpu.toFixed(1)} ms) is the browser working out the scene, the same at every quality.</p>`
+        + (crowd ? `<p><b>Another Visualizer is open on this PC</b> (${crowd} more), sharing the card, so these numbers read high. Close it and test again for the true picture.</p>` : '');
       best = fit ? fit.q.id : 'low';
     }
     quality = best; prefs.set('bestQuality', best); apply(); paint();
-    btn.textContent = 'TEST AGAIN'; btn.disabled = false;
+    btn.textContent = 'Test again'; btn.disabled = false;
     testing = false;
   }
 
@@ -137,7 +157,7 @@ export function makeSettings(hooks) {
     const lines = hours.map((h, i) => h && `<div><span>${i === 4 ? 'HOUR 5+' : 'HOUR ' + (i + 1)}</span><b>${(h.fps / h.n).toFixed(0)} fps · worst ${(h.low / h.n).toFixed(0)} · ${h.n} min</b></div>`).filter(Boolean).join('');
     const first = hours[0], lastH = hours.filter(Boolean).pop();
     const drop = first && lastH !== first ? 1 - (lastH.low / lastH.n) / (first.low / first.n) : 0;
-    el.innerHTML = lines + `<p>${rows.length} minutes logged. ${hours.filter(Boolean).length < 2 ? 'Listen past an hour in one sitting to see if it holds.' : drop > 0.12 ? `The worst frames get ${Math.round(drop * 100)}% slower in the later hours: the card may be running hot. The Loft steps down by itself when that happens (dusting the PC would help too).` : 'Steady over the hours: the card is keeping cool.'}</p>`;
+    el.innerHTML = lines + `<p>${rows.length} minutes logged. ${hours.filter(Boolean).length < 2 ? 'Listen past an hour in one sitting to see if it holds.' : drop > 0.12 ? `The worst frames get ${Math.round(drop * 100)}% slower in the later hours: the card may be running hot. The Visualizer steps down by itself when that happens (dusting the PC would help too).` : 'Steady over the hours: the card is keeping cool.'}</p>`;
   }
 
   function open() { box.classList.add('on'); box.classList.remove('deep'); paint(); live(); clearInterval(liveT); liveT = setInterval(live, 500); }

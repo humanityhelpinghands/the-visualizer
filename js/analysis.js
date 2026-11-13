@@ -23,27 +23,64 @@ function makeFFT(n) {
     cs[i] = Math.cos((2 * Math.PI * i) / n);
     sn[i] = -Math.sin((2 * Math.PI * i) / n);
   }
-  return (re, im) => {
-    for (let i = 0; i < n; i++) {
-      const j = rev[i];
-      if (j > i) {
-        let t = re[i]; re[i] = re[j]; re[j] = t;
-        t = im[i]; im[i] = im[j]; im[j] = t;
-      }
-    }
-    for (let size = 2; size <= n; size <<= 1) {
+  // The input must be real and already sit in bit-reversed order: callers load
+  // re[rev[i]] (and zero im), which saves the swap pass. Butterflies within a stage are
+  // independent, so small stages run twiddle-major (same arithmetic, less loop
+  // overhead); the result is bit-identical to the textbook loop order.
+  // Twiddle 0 is exactly (1, -0), so its butterflies are a plain add and
+  // subtract: identical values, up to the sign of a zero, which no magnitude
+  // downstream can see. The first stage sees a real input (im is all zero).
+  const fft = (re, im) => {
+    for (let a = 0; a < n; a += 2) { const t = re[a + 1]; re[a + 1] = re[a] - t; re[a] += t; }
+    for (let size = 4; size <= n; size <<= 1) {
       const half = size >> 1, step = n / size;
-      for (let i = 0; i < n; i += size) {
-        for (let j = 0, k = 0; j < half; j++, k += step) {
-          const a = i + j, b = a + half;
-          const tr = re[b] * cs[k] - im[b] * sn[k];
-          const ti = re[b] * sn[k] + im[b] * cs[k];
-          re[b] = re[a] - tr; im[b] = im[a] - ti;
-          re[a] += tr; im[a] += ti;
+      for (let a = 0; a < n; a += size) {
+        const b = a + half, tr = re[b], ti = im[b];
+        re[b] = re[a] - tr; im[b] = im[a] - ti;
+        re[a] += tr; im[a] += ti;
+      }
+      if (half < 16) {
+        for (let j = 1, k = step; j < half; j++, k += step) {
+          const c = cs[k], s = sn[k];
+          for (let a = j; a < n; a += size) {
+            const b = a + half;
+            const tr = re[b] * c - im[b] * s;
+            const ti = re[b] * s + im[b] * c;
+            re[b] = re[a] - tr; im[b] = im[a] - ti;
+            re[a] += tr; im[a] += ti;
+          }
+        }
+      } else if (size === n) {
+        // Last stage: only bins below n/2 are ever read, so the upper half is skipped.
+        for (let j = 1, k = step; j < half; j++, k += step) {
+          const b = j + half;
+          re[j] += re[b] * cs[k] - im[b] * sn[k];
+          im[j] += re[b] * sn[k] + im[b] * cs[k];
+        }
+      } else {
+        for (let i = 0; i < n; i += size) {
+          for (let j = 1, k = step; j < half; j++, k += step) {
+            const a = i + j, b = a + half;
+            const tr = re[b] * cs[k] - im[b] * sn[k];
+            const ti = re[b] * sn[k] + im[b] * cs[k];
+            re[b] = re[a] - tr; im[b] = im[a] - ti;
+            re[a] += tr; im[a] += ti;
+          }
         }
       }
     }
   };
+  fft.rev = rev;
+  return fft;
+}
+
+function hypot2(x, y) {
+  // The larger term scales to exactly 1, so only the smaller one is divided.
+  const ax = Math.abs(x), ay = Math.abs(y);
+  if (ax > ay) { const b = ay / ax; return Math.sqrt(1 + b * b) * ax; }
+  if (ay === 0) return 0;
+  const a = ax / ay;
+  return Math.sqrt(a * a + 1) * ay;
 }
 
 function percentile(arr, p) {
@@ -147,7 +184,7 @@ function keyOf(chroma) {
 
 // Chroma from a finer FFT (4096 points, ~5 Hz bins at 22 kHz) every ~186 ms.
 function chromaFrames(x, rate) {
-  const NF = 4096, hop = 4096, fft = makeFFT(NF);
+  const NF = 4096, hop = 4096, fft = makeFFT(NF), rev = fft.rev;
   const win = new Float32Array(NF);
   for (let i = 0; i < NF; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / NF);
   const binHz = rate / NF, k0 = Math.ceil(80 / binHz), k1 = Math.min(NF / 2 - 1, Math.floor(4000 / binHz));
@@ -157,11 +194,12 @@ function chromaFrames(x, rate) {
   const out = new Float32Array(frames * 12), re = new Float32Array(NF), im = new Float32Array(NF);
   for (let f = 0; f < frames; f++) {
     const o = f * hop;
-    for (let i = 0; i < NF; i++) { re[i] = x[o + i] * win[i]; im[i] = 0; }
+    for (let i = 0; i < NF; i++) re[rev[i]] = x[o + i] * win[i];
+    im.fill(0);
     fft(re, im);
     let sum = 0;
     for (let k = k0; k <= k1; k++) {
-      const v = Math.log1p(200 * Math.hypot(re[k], im[k]) / NF);
+      const v = Math.log1p(200 * hypot2(re[k], im[k]) / NF);
       out[f * 12 + pc[k]] += v;
       sum += v;
     }
@@ -194,7 +232,7 @@ export function analyze(mono, sampleRate, onProgress = () => {}, opts = {}) {
   }
 
   // 2. Spectral pass.
-  const fft = makeFFT(N);
+  const fft = makeFFT(N), rev = fft.rev;
   const hann = new Float32Array(N);
   for (let i = 0; i < N; i++) hann[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / N);
   const re = new Float32Array(N), im = new Float32Array(N);
@@ -214,13 +252,14 @@ export function analyze(mono, sampleRate, onProgress = () => {}, opts = {}) {
     for (let i = 0; i < N; i++) {
       const s = x[o + i];
       e += s * s;
-      re[i] = s * hann[i]; im[i] = 0;
+      re[rev[i]] = s * hann[i];
     }
+    im.fill(0);
     rms[f] = Math.sqrt(e / N);
     fft(re, im);
     let fl = 0, hf = 0, kf = 0, lo = 0, mi = 0, hi = 0;
     for (let k = 1; k < N / 2; k++) {
-      const mag = Math.hypot(re[k], im[k]) * scale;
+      const mag = hypot2(re[k], im[k]) * scale;
       const lm = Math.log1p(100 * mag);
       const d = lm - prev[k];
       if (d > 0) {
@@ -296,11 +335,13 @@ export function analyze(mono, sampleRate, onProgress = () => {}, opts = {}) {
   const track = (P, tight = 100) => {
     const score = new Float32Array(nF), back = new Int32Array(nF).fill(-1);
     const lo2 = Math.round(P / 2), hi2 = Math.round(2 * P);
+    // The jump penalty depends only on the gap, so it is computed once per gap.
+    const pen = new Float64Array(hi2 + 1);
+    for (let d = Math.max(0, lo2); d <= hi2; d++) { const r = Math.log(d / P); pen[d] = tight * r * r; }
     for (let i = 0; i < nF; i++) {
       let best = -Infinity, bi = -1;
-      for (let p = Math.max(0, i - hi2); p <= i - lo2; p++) {
-        const r = Math.log((i - p) / P);
-        const s = score[p] - tight * r * r;
+      for (let p = Math.max(0, i - hi2), pEnd = i - lo2; p <= pEnd; p++) {
+        const s = score[p] - pen[i - p];
         if (s > best) { best = s; bi = p; }
       }
       score[i] = onset[i] + (bi >= 0 ? Math.max(0, best) : 0);
@@ -481,7 +522,7 @@ export function analyze(mono, sampleRate, onProgress = () => {}, opts = {}) {
     }
     // Robust threshold (median and MAD, not mean and spread): one huge change late
     // in a song (a breakdown into the last drop) used to raise the bar so high that
-    // every verse/chorus boundary before it went unseen (one song read 0:00-2:53 as
+    // every verse/chorus boundary before it went unseen (Untitled read 0:00-2:53 as
     // one section).
     const nmed = percentile(nov, 0.5);
     const mad = percentile(Array.from(nov, (v) => Math.abs(v - nmed)), 0.5) * 1.4826;
@@ -494,7 +535,7 @@ export function analyze(mono, sampleRate, onProgress = () => {}, opts = {}) {
     const cuts = [];
     for (const cIdx of cands) {
       if (cuts.length >= maxSections - 1) break;
-      if (cIdx < 4 || nBars - cIdx < 2) continue;
+      if (cIdx < 4 || nBars - cIdx < 4) continue;   // a cut 2 bars from the end made a 1-bar "section" out of the fade-out
       if (cuts.every((u) => Math.abs(u - cIdx) >= 4)) cuts.push(cIdx);
     }
     cuts.sort((p, q) => p - q);

@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { SIMPLEX, RAMP } from './glsl.js';
 
 const COMMON = /* glsl */ `
-  uniform float uTime, uLow, uMid, uHigh, uKick, uFade, uEnd, uHeartAmt, uFeel;
+  uniform float uTime, uLow, uMid, uHigh, uKick, uFade, uEnd, uHeartAmt, uFeel, uWob;
   uniform vec3 uHeartTint;
   // The core's temperament (visuals.js, from the part's feelings): phases the CPU
   // accumulates (so a change of pace never jumps the surface), the heart's size and
@@ -43,9 +43,36 @@ function mergedVerts(geo) {
   return g;
 }
 
+// The same mesh with each corner shared by the triangles that meet there (an icosphere
+// lists a corner once per triangle, six times over): the plasma's noise runs once per
+// point instead of six times, and the surface is the same.
+function shared(geo) {
+  const pos = geo.attributes.position, nor = geo.attributes.normal, at = new Map(), P = [], N = [], I = new Uint32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const key = (Math.round((x + 4) * 8000) * 65536 + Math.round((y + 4) * 8000)) * 65536 + Math.round((z + 4) * 8000);
+    let j = at.get(key);
+    if (j === undefined) { j = P.length / 3; at.set(key, j); P.push(x, y, z); N.push(nor.getX(i), nor.getY(i), nor.getZ(i)); }
+    I[i] = j;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3));
+  g.setIndex(new THREE.BufferAttribute(I, 1));
+  return g;
+}
+
+// The core's own light: everything the core gives off (the plasma and its burning rim, the wire shell, the nodes,
+// picture had been dimmed for the core by mistake: "The core was too bright. Just a fiery parts of it. Like the core
+// itself, like everything about the core. Nothing else was too bright." Less light going in also means less of it runs
+// to white, so the fire keeps more of its colour: a clear dark face in a burning ring, not a white ball.
+// Measured in the preview on Welcome to the Funeral, the same frames drawn at each value: at the scream (3:03) the
+// part of the core's surroundings brighter than a light gray falls from 33% (at 1) to 13% (at 0.3) to 5% (at 0.2),
+export const CORE_LIGHT = 0.2;
+
 export function makeCore(pal) {
   const uniforms = {
-    uTime: { value: 0 }, uLow: { value: 0 }, uMid: { value: 0 }, uHigh: { value: 0 }, uKick: { value: 0 }, uFade: { value: 1 },
+    uTime: { value: 0 }, uLow: { value: 0 }, uMid: { value: 0 }, uHigh: { value: 0 }, uKick: { value: 0 }, uFade: { value: CORE_LIGHT }, uWob: { value: 0 },
     uEnd: { value: 0 }, uHeartTint: { value: new THREE.Color() }, uHeartAmt: { value: 0 }, uFeel: { value: 0 },
     uBoilT: { value: 0 }, uSpikeT: { value: 0 }, uFlowT: { value: 0 }, uTwT: { value: 0 }, uBreath: { value: 0.9 },
     uSpike: { value: 4 }, uSpikeGain: { value: 1 }, uRidge: { value: 1 }, uNodeCut: { value: 0.55 }, uHeartSize: { value: 60 }, uDissolve: { value: 0 }, uArc: { value: 0 }, uShellTurn: { value: 1 }, uScream: { value: 0 }, uPower: { value: 0 }, uAware: { value: 0 }, uDual: { value: new THREE.Color() }, uRimCol: { value: new THREE.Color(0.6, 0.85, 1) }, uBodyCol: { value: new THREE.Color(0.2, 0.3, 1) },
@@ -56,6 +83,7 @@ export function makeCore(pal) {
   const styles = {};
   const plasmaVert = /* glsl */ `${COMMON}
     varying vec3 vN; varying vec3 vView; varying float vD; varying vec3 vObj;
+    varying vec3 vSlow;
     ${SIMPLEX}
     void main(){
       vec3 n = normalize(normal);
@@ -71,7 +99,7 @@ export function makeCore(pal) {
       float sp = snoise(n * 4.5 + vec3(ts * 1.7, -ts * 1.1, ts * 0.8));
       float spikes = pow(max(sp, 0.0), uSpike);   // a high exponent: few, sharp stabs; a low one: broad, rounded swells
       float ridge = pow(max(1.0 - abs(snoise(n * 3.1 - vec3(t * 0.9))), 0.0), 9.0);   // noise can overshoot 1: never pow() a negative (NaN on Windows)
-      float stab = spikes * (0.6 * uKick + 0.12 * low) * uSpikeGain;
+      float stab = spikes * (0.6 * uKick + 0.12 * low + 0.75 * uWob) * uSpikeGain;   // a womp stabs the spikes out as it opens
       // Screaming: the whole skin bristles, spikes out even between kicks, sharper and longer.
       float rage = pow(max(snoise(n * 6.0 + vec3(ts * 3.0, -ts * 2.2, ts * 1.6)), 0.0), 2.5);
       // One being on one scale: at rest it bristles faintly, as it wakes the bristling
@@ -93,6 +121,10 @@ export function makeCore(pal) {
       // Only the jagged reactions (spikes, crackle) glow: the slow boil, however hard
       // the bass pushes it, stays the dark body (or a heavy song floods the void).
       vD = jag; vObj = n * 2.0 + vec3(n1 * 0.4);
+      // The plasma's three slow layers (currents, churn, sunspots: a wavelength spans hundreds of this sphere's
+      // points) are read here once per point instead of once per pixel: the same picture, ~1 ms a frame cheaper
+      // at 1080p ULTRA (2026-11-05). The fine ones (cells, granules) stay per pixel.
+      vSlow = vec3(snoise(vObj * 0.9 + vec3(0.0, uFlowT, uFlowT * 0.6)), snoise(vObj * 1.6 + vec3(uFlowT * 0.8, -uFlowT * 0.5, 0.0)), snoise(vObj * 1.3 + vec3(uFlowT * 0.3)));
       vec4 mv = modelViewMatrix * vec4(p, 1.0);
       vN = normalize(normalMatrix * normal); vView = -mv.xyz;
       gl_Position = projectionMatrix * mv;
@@ -101,13 +133,14 @@ export function makeCore(pal) {
     uniforms, vertexShader: plasmaVert, ...additive,
     fragmentShader: /* glsl */ `${COMMON}
       varying vec3 vN; varying vec3 vView; varying float vD; varying vec3 vObj;
+      varying vec3 vSlow;
       ${SIMPLEX}${RAMP}
       void main(){
         float f = pow(clamp(1.0 - abs(dot(normalize(vN), normalize(vView))), 0.0, 1.0), 2.2);
         // Stoic inside: broad, slow currents at a steady pace whatever the music does
         // (the violence lives on the surface, in the spikes).
         float flowT = uFlowT;
-        float v = 1.0 - abs(snoise(vObj * 0.9 + vec3(0.0, flowT, flowT * 0.6)));
+        float v = 1.0 - abs(vSlow.x);
         float fil = pow(clamp(v, 0.0, 1.0), 9.0) * (0.6 + 0.5 * min(uLow, 1.0));   // thin currents, not a slick
         // The singularity: black void inside, one small blazing heart at the very centre
         // (breathing slowly with the bass), thin vivid currents, a burning rim. No dim
@@ -126,10 +159,10 @@ export function makeCore(pal) {
         float L1 = smoothstep(0.62, 0.86, depth) * (1.0 - smoothstep(0.86, 0.96, depth));   // inner plasma
         float L2 = smoothstep(0.32, 0.55, depth) * (1.0 - smoothstep(0.62, 0.86, depth));   // convection
         float L3 = smoothstep(0.08, 0.25, depth) * (1.0 - smoothstep(0.32, 0.55, depth));   // photosphere
-        float churn = 0.5 + 0.5 * snoise(vObj * 1.6 + vec3(flowT * 0.8, -flowT * 0.5, 0.0));
-        float cells = pow(1.0 - abs(snoise(vObj * 4.5 + vec3(0.0, flowT * 1.6, flowT))), 3.0);
-        float gran = pow(1.0 - abs(snoise(vObj * 9.0 - vec3(flowT * 2.0))), 4.0);
-        float spots = smoothstep(0.55, 0.75, snoise(vObj * 1.3 + vec3(flowT * 0.3)));
+        float churn = 0.5 + 0.5 * vSlow.y;
+        float cells = pow(max(1.0 - abs(snoise(vObj * 4.5 + vec3(0.0, flowT * 1.6, flowT))), 0.0), 3.0);   // (noise can overshoot 1: never pow() a negative, NaN on D3D)
+        float gran = pow(max(1.0 - abs(snoise(vObj * 9.0 - vec3(flowT * 2.0))), 0.0), 4.0);
+        float spots = smoothstep(0.55, 0.75, vSlow.z);
         float lowB = min(uLow, 1.0), hot = uPower;
         vec3 body = uBodyCol * 1.5 * (1.0 - 0.65 * hot);
         vec3 rim = mix(uRimCol, vec3(1.0), 0.75 * hot) * 1.7;
@@ -170,7 +203,7 @@ export function makeCore(pal) {
     const g = new THREE.Group();
     const shellGeo = new THREE.IcosahedronGeometry(1.95, 3);   // a few large cells: it frames the plasma, never a ball of yarn
     // (84k triangles: finer, smoother spikes; measured at +0.3 ms a frame on an RX 6600 XT)
-    const body = new THREE.Mesh(new THREE.IcosahedronGeometry(1.55, 64), plasmaMat), shell = new THREE.Mesh(shellGeo, plasmaWire);
+    const body = new THREE.Mesh(shared(new THREE.IcosahedronGeometry(1.55, 64)), plasmaMat), shell = new THREE.Mesh(shellGeo, plasmaWire);
     const nodes = new THREE.Points(mergedVerts(shellGeo), nodeMat);
     // A dark heart inside the plasma: the room behind no longer shows through it, and
     // the net's far half tucks behind it, so the core reads solid and deep.
@@ -198,6 +231,7 @@ export function makeCore(pal) {
   spits.frustumCulled = false;
   const blobs = Array.from({ length: SPITS }, () => ({ life: 0, p: new THREE.Vector3(), v: new THREE.Vector3(), s: 0, spin: new THREE.Quaternion() }));
   const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), hidden = new THREE.Matrix4().makeScale(0, 0, 0), up = new THREE.Vector3(0, 1, 0), vn = new THREE.Vector3();
+  const aim = new THREE.Vector3(), jit = new THREE.Vector3(), dir = new THREE.Vector3(), axis = new THREE.Vector3();   // scratch: no garbage per frame
   let next = 0, owed = 0, lastKick = 0, awareIn = 4, awareT = 99;
   group.add(spits);
   // Fire: each gob burns as it flies, a burst of real volumetric fire and smoke rendered in
@@ -224,9 +258,9 @@ export function makeCore(pal) {
         vec2 a = vec2(mod(fi, 4.0), floor(fi / 4.0)), b = vec2(mod(min(fi + 1.0, 15.0), 4.0), floor(min(fi + 1.0, 15.0) / 4.0));
         float fa = texture2D(uFire, vec2((a.x + vUv.x) * 0.25, 1.0 - (a.y + 1.0 - vUv.y) * 0.25)).r;
         float fb = texture2D(uFire, vec2((b.x + vUv.x) * 0.25, 1.0 - (b.y + 1.0 - vUv.y) * 0.25)).r;
-        float f = pow(mix(fa, fb, fr - fi), 1.6);   // (contrast: tongues of flame, not a haze)
-        vec3 hot = mix(uRimCol, vec3(1.0), 0.5);
-        vec3 col = mix(uBodyCol, hot, smoothstep(0.25, 0.9, f) * vL) * f * (0.6 + 1.6 * vL);
+        float f = pow(mix(fa, fb, fr - fi), 2.2);   // (contrast: tongues of flame, not a haze or a pompom)
+        vec3 hot = mix(uRimCol, vec3(1.0), 0.15);   // (stacked gobs add up: keep them coloured, not white)
+        vec3 col = mix(uBodyCol, hot, smoothstep(0.25, 0.9, f) * vL) * f * (0.45 + 1.0 * vL);
         gl_FragColor = vec4(col * uFade, 1.0);
       }`,
     transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
@@ -258,18 +292,18 @@ export function makeCore(pal) {
       owed += scream > 0.6 ? dt * 1.5 * scream : 0;
       const burst = scream > 0.6 && kick > 0.55 && lastKick <= 0.55 ? 4 + Math.floor(Math.random() * 6) : 0;
       lastKick = kick;
-      const aim = new THREE.Vector3(Math.random() * 2 - 1, Math.random() * 1.4 - 0.4, Math.random() * 2 - 1).normalize();
+      aim.set(Math.random() * 2 - 1, Math.random() * 1.4 - 0.4, Math.random() * 2 - 1).normalize();
       for (let k = 0; k < burst + Math.floor(owed); k++) {
         const b = blobs[next++ % SPITS];
-        const d = (k < burst ? aim.clone().add(new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(0.7)) : new THREE.Vector3(Math.random() * 2 - 1, Math.random() * 1.4 - 0.4, Math.random() * 2 - 1)).normalize();
+        const d = (k < burst ? dir.copy(aim).add(jit.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(0.7)) : dir.set(Math.random() * 2 - 1, Math.random() * 1.4 - 0.4, Math.random() * 2 - 1)).normalize();
         b.p.copy(d).multiplyScalar(1.6 + Math.random() * 0.3);
         b.v.copy(d).multiplyScalar(5 + Math.random() * 9);   // uneven: some gobs barely leave, some fly
         b.s = 0.04 + Math.random() * Math.random() * 0.22;  // mostly small droplets, the odd big gob
-        b.spin.setFromAxisAngle(new THREE.Vector3(Math.random(), Math.random(), Math.random()).normalize(), Math.random() * 6.28);
+        b.spin.setFromAxisAngle(axis.set(Math.random(), Math.random(), Math.random()).normalize(), Math.random() * 6.28);
         b.life = b.life0 = 0.6 + Math.random() * 0.6;
       }
       owed -= Math.floor(owed);
-      spitMat.color.copy(uniforms.uRimCol.value).multiplyScalar(1.6);   // the shards are the rim's own fire
+      spitMat.color.copy(uniforms.uRimCol.value).multiplyScalar(1.6 * uniforms.uFade.value);   // the shards are the rim's own fire (and share the core's light)
       blobs.forEach((b, i) => {
         if (b.life <= 0) { spits.setMatrixAt(i, hidden); fire.setMatrixAt(i, hidden); fireLife.array[i] = 0; return; }
         b.life -= dt * 1.1; b.v.multiplyScalar(Math.exp(-dt * 3)); b.v.y -= dt * 4; b.p.addScaledVector(b.v, dt);

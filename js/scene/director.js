@@ -87,6 +87,17 @@ const SHOTS = {
     },
   },
   // Awe: far back inside the room, slowly circling, the core a lone star in the dark.
+  // The rare deep zoom-out (a quiet outro, now and then): the camera pulls back until the
+  // Loft is a small glowing point in the dark, the observable universe around it.
+  cosmos: {
+    family: 'cosmos',
+    make: (R) => ({ a0: R() * TAU, dir: R() < 0.5 ? -1 : 1 }),
+    at(u, p, o) {
+      const k = 1 - Math.exp(-u * 0.09), r = 22 + 200 * k, a = p.a0 + u * 0.02 * p.dir;
+      o.pos.set(Math.cos(a) * r, 3 + 30 * k, Math.sin(a) * r);
+      o.look.set(0, 40 * k, 0); o.fov = 46;   // (looking up as it goes: the Loft sinks to the bottom of the frame, the stars fill the rest)
+    },
+  },
   vast: {
     family: 'vast',
     make: (R) => ({ a0: R() * TAU, dir: R() < 0.5 ? -1 : 1, r: 20 + R() * 2.5, h: 2.5 + R() * 2 }),   // low enough (with its sway, 14° down at most against a 17° half-view) that the horizon always shows
@@ -128,7 +139,7 @@ export class Director {
       this.from.fov = this.camera.fov;
     }
     this.blend = 0; this.blendDur = blend;
-    this.shot = name;
+    this.shot = name; this.age = 0;   // (age: real seconds on this shot, whatever its pace: the aerial's ~8 s cap reads it)
     this.params = SHOTS[name].make(this.R);
     this.u = 0;
   }
@@ -141,7 +152,7 @@ export class Director {
   // coreR: the core's visible radius with its halo (world units).
   // pace: how fast the shot itself moves (the part's and the feeling's tempo).
   update(dt, { build = 0, level = 0, time = 0, coreR = 0, pace = 1 } = {}) {
-    this.t += dt; this.u += dt * pace;
+    this.t += dt; this.u += dt * pace; this.age = (this.age || 0) + dt;
     const o = this.o;
     SHOTS[this.shot].at(this.u, this.params, o);
 

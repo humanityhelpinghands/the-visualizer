@@ -1,8 +1,15 @@
-music/*
-!music/README.txt
-cache/
 renders/
 .venv/
 voice/*.onnx
 voice/*.bin
 __pycache__/
+# (the songs that come with it, and their timed lyrics, are part of the copy; anything else made while it runs is not)
+music/*
+!music/README.txt
+!music/*.mp3
+cache/*
+!cache/lyric-colors.json
+!cache/lyrics/
+cache/lyrics/*
+!cache/lyrics/*.lrc
+!cache/lyrics/*.heard.json

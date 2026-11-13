@@ -120,11 +120,11 @@ export class Kokoro {
   get ok() { return this.state === 'ready' || this.state === 'loading'; }
 
   // Starts generating now; the promise resolves to { buffer, words }.
-  prepare(text, voice = this.voice) {
-    const key = voice + '|' + text;
+  prepare(text, voice = this.voice, speed = 0.95) {
+    const key = voice + '|' + speed + '|' + text;
     if (this.cache.has(key)) return this.cache.get(key);
     const p = (async () => {
-      const r = await fetch('/api/say?' + new URLSearchParams({ text, voice, speed: '0.95' }));
+      const r = await fetch('/api/say?' + new URLSearchParams({ text, voice, speed: String(speed) }));
       let j;
       try { j = await r.json(); } catch (err) { throw new Error(`${r.status} ${r.statusText}`); }
       if (!r.ok || j.error) throw new Error(j.error || `${r.status} ${r.statusText}`);

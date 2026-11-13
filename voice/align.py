@@ -182,28 +182,70 @@ def tokens(word):
 
 
 def _lev(a, b):
+    """Edit distance. (Shared prefix and suffix trimmed first: the distance is the same, the table smaller.)"""
+    if a == b:
+        return 0
+    i, n = 0, min(len(a), len(b))
+    while i < n and a[i] == b[i]:
+        i += 1
+    a, b = a[i:], b[i:]
+    while a and b and a[-1] == b[-1]:
+        a, b = a[:-1], b[:-1]
     if len(a) < len(b):
         a, b = b, a
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        cur = [i]
-        for j, cb in enumerate(b, 1):
-            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
-        prev = cur
-    return prev[-1]
+    m = len(b)
+    if not m:
+        return len(a)
+    # Myers / Hyyro bit-parallel edit distance: one pass over a, the shorter word as bits.
+    peq = {}
+    for i, c in enumerate(b):
+        peq[c] = peq.get(c, 0) | (1 << i)
+    mask = (1 << m) - 1
+    last = 1 << (m - 1)
+    pv, mv, score = mask, 0, m
+    for c in a:
+        eq = peq.get(c, 0)
+        xv = eq | mv
+        xh = (((eq & pv) + pv) ^ pv) | eq
+        ph = mv | ~(xh | pv)
+        mh = pv & xh
+        if ph & last:
+            score += 1
+        elif mh & last:
+            score -= 1
+        ph = (ph << 1) | 1
+        mh <<= 1
+        pv = (mh | ~(xv | ph)) & mask
+        mv = ph & xv & mask
+    return score
+
+
+_SILENT_START = re.compile(r"^kn|^wr|^wh")
+_SOFT_C = re.compile(r"c(?=[eiy])")
+_END_D = re.compile(r"d$")
+_VOWELS = re.compile(r"[aeiouy]")
+_DOUBLES = re.compile(r"(.)\1+")
+_phon_cache = {}
 
 
 def _phon(w):
     """A rough sound-key: 'night'/'knight', 'flame'/'phlame', 'sea'/'see' agree."""
-    w = re.sub(r"^kn|^wr|^wh", lambda m: m.group(0)[1], w)
+    hit = _phon_cache.get(w)
+    if hit is not None:
+        return hit
+    key = w
+    w = _SILENT_START.sub(lambda m: m.group(0)[1], w)
     for a, b in (("ph", "f"), ("ck", "k"), ("gh", ""), ("q", "k"), ("x", "ks"), ("z", "s"), ("v", "f"), ("dg", "j")):
         w = w.replace(a, b)
-    w = re.sub(r"c(?=[eiy])", "s", w).replace("c", "k")
-    w = re.sub(r"d$", "t", w)
-    if not w:
-        return w
-    w = w[0] + re.sub(r"[aeiouy]", "", w[1:])
-    return re.sub(r"(.)\1+", r"\1", w)
+    w = _SOFT_C.sub("s", w).replace("c", "k")
+    w = _END_D.sub("t", w)
+    if w:
+        w = w[0] + _VOWELS.sub("", w[1:])
+        w = _DOUBLES.sub(r"\1", w)
+    if len(_phon_cache) > 200000:      # (a long-running server: never grows without end)
+        _phon_cache.clear()
+    _phon_cache[key] = w
+    return w
 
 
 _sim_cache = {}
@@ -211,8 +253,9 @@ _sim_cache = {}
 
 def sim(a, b):
     key = (a, b)
-    if key in _sim_cache:
-        return _sim_cache[key]
+    s = _sim_cache.get(key)
+    if s is not None:
+        return s
     if a == b:
         s = 1.0
     elif EQUIV.get(a, a) == EQUIV.get(b, b):
@@ -226,8 +269,20 @@ def sim(a, b):
             s = max(s, 0.85 * (1 - _lev(pa, pb) / max(len(pa), len(pb))))
         if min(len(a), len(b)) <= 2:
             s *= 0.7                                   # "a" vs "i": tiny words say little
+    if len(_sim_cache) > 1000000:      # (about 100 MB at most, then it starts over)
+        _sim_cache.clear()
     _sim_cache[key] = s
     return s
+
+
+def _sim_rows(toks, B):
+    """sim() of each distinct token in toks against every heard token, one list per token."""
+    rows, uniq = {}, list(dict.fromkeys(B))
+    for a in toks:
+        if a not in rows:
+            got = {b: sim(a, b) for b in uniq}
+            rows[a] = [got[b] for b in B]
+    return rows
 
 
 # ── the alignment ─────────────────────────────────────────────────────
@@ -242,26 +297,35 @@ def _nw(A, B):
     n, m = len(A), len(B)
     dA = [0.05 if a["optional"] else 0.45 for a in A]          # your word not heard
     iB = [0.25 + 0.3 * b["p"] for b in B]                      # heard word not in your text
-    NEG = -1e18
+    rows = _sim_rows([a["tok"] for a in A], [b["tok"] for b in B])
     prev = [0.0] * (m + 1)
     for j in range(1, m + 1):
         prev[j] = prev[j - 1] - iB[j - 1]
     back = []
-    for i in range(1, n + 1):
-        a = A[i - 1]["tok"]
-        cur = [prev[0] - dA[i - 1]] + [NEG] * m
+    for i in range(n):
+        da = dA[i]
+        left = prev[0] - da
+        cur = [left]
+        put = cur.append
         bt = bytearray(m + 1)
         bt[0] = 1
-        for j in range(1, m + 1):
-            d = prev[j - 1] + 2 * sim(a, B[j - 1]["tok"]) - 1
-            u = prev[j] - dA[i - 1]
-            l = cur[j - 1] - iB[j - 1]
+        diag = prev[0]
+        j = 1
+        for up, s, ib in zip(prev[1:], rows[A[i]["tok"]], iB):
+            d = diag + 2 * s - 1
+            u = up - da
+            l = left - ib
             if d >= u and d >= l:
-                cur[j], bt[j] = d, 0
+                left = d
             elif u >= l:
-                cur[j], bt[j] = u, 1
+                left = u
+                bt[j] = 1
             else:
-                cur[j], bt[j] = l, 2
+                left = l
+                bt[j] = 2
+            put(left)
+            diag = up
+            j += 1
         back.append(bt)
         prev = cur
     match = [-1] * n
@@ -288,26 +352,35 @@ def _local(line_toks, run):
     """Best placement of a whole written line inside a run of heard tokens.
     Returns (score per token, [run index or -1 per line token])."""
     n, m = len(line_toks), len(run)
-    NEG = -1e18
+    rows = _sim_rows(line_toks, [r["tok"] for r in run])
     prev = [0.0] * (m + 1)                                      # free start anywhere in the run
     back = []
-    for i in range(1, n + 1):
-        cur = [prev[0] - 0.45] + [NEG] * m
+    for i in range(n):
+        left = prev[0] - 0.45
+        cur = [left]
+        put = cur.append
         bt = bytearray(m + 1)
         bt[0] = 1
-        for j in range(1, m + 1):
-            d = prev[j - 1] + 2 * sim(line_toks[i - 1], run[j - 1]["tok"]) - 1
-            u = prev[j] - 0.45
-            l = cur[j - 1] - 0.4
+        diag = prev[0]
+        j = 1
+        for up, s in zip(prev[1:], rows[line_toks[i]]):
+            d = diag + 2 * s - 1
+            u = up - 0.45
+            l = left - 0.4
             if d >= u and d >= l:
-                cur[j], bt[j] = d, 0
+                left = d
             elif u >= l:
-                cur[j], bt[j] = u, 1
+                left = u
+                bt[j] = 1
             else:
-                cur[j], bt[j] = l, 2
+                left = l
+                bt[j] = 2
+            put(left)
+            diag = up
+            j += 1
         back.append(bt)
         prev = cur
-    j_end = max(range(m + 1), key=lambda j: prev[j])            # free end too
+    j_end = max(range(m + 1), key=prev.__getitem__)            # free end too
     score = prev[j_end]
     match = [-1] * n
     i, j = n, j_end
@@ -410,8 +483,11 @@ def align(written, heard, junk=()):
     # Per line: which words were heard, and how sure.
     out = [None] * len(written)
     used_B = set()
+    by_line = [[] for _ in written]
+    for q, a in enumerate(A):
+        by_line[a["li"]].append(q)
     for li, L in enumerate(written):
-        idx = [q for q, a in enumerate(A) if a["li"] == li]
+        idx = by_line[li]
         nw = len(L["words"])
         times, weight, got = [None] * nw, 0.0, 0.0
         anchors = []

@@ -13,7 +13,7 @@ export class UI {
       gate: $('gate'), loading: $('loading'), loadLabel: $('load-label'), loadBar: $('load-bar'),
       lyric: $('lyric'), caption: $('caption'), card: $('title-card'), cardTitle: $('card-title'), cardSub: $('card-sub'),
       hud: $('hud'), seek: $('seek'), play: $('play'), prev: $('prev'), next: $('next'),
-      title: $('np-title'), sub: $('np-sub'), time: $('time'), vol: $('vol'), search: $('track-search'),
+      title: $('np-title'), sub: $('np-sub'), time: $('time'), tNow: $('t-now'), vol: $('vol'), search: $('track-search'),
       listBtn: $('list-btn'), fsBtn: $('fs-btn'), drawer: $('drawer'), list: $('track-list'), toasts: $('toasts'),
       bpm: $('stat-bpm'), fps: $('stat-fps'), dropHint: $('drop-hint'), empty: $('empty'),
     };
@@ -24,6 +24,9 @@ export class UI {
     this._wireIdle();
     this._wireSeek();
     this._wireSearch();
+    $('keys-toggle').onclick = () => this.el.drawer.classList.toggle('show-keys');
+    // The dock's height, for a narrow window's drawer to stop on its top edge (css: #drawer). Fires only when the dock resizes.
+    if (window.ResizeObserver) new ResizeObserver(() => document.documentElement.style.setProperty('--dock-h', this.el.hud.offsetHeight + 'px')).observe(this.el.hud);
   }
   // The drawer's search: type to narrow, Enter plays the top match, Esc clears then closes.
   _wireSearch() {
@@ -61,7 +64,7 @@ export class UI {
   }
   fatal(msg) {
     document.body.classList.add('fatal');
-    this.el.gate.classList.remove('gone');
+    this.el.gate.classList.remove('gone', 'loading');
     this.el.gate.querySelector('.hint').textContent = msg;
   }
   setEmpty(on) { this.el.empty.classList.toggle('on', on); }
@@ -138,11 +141,15 @@ export class UI {
   }
   lyricProgress(k, p) {
     const s = this.wordEls[k];
+    // (each value written only when it changes: the words already sung hold 100% for the whole line)
+    const setP = (w, v) => { if (w._p !== v) { w._p = v; w.style.setProperty('--p', v); } };
     if (s) {
-      s.style.setProperty('--p', (Math.max(0, Math.min(1, p)) * 100).toFixed(1) + '%');
-      s.style.setProperty('--hold', Math.max(0, Math.min(1, p)).toFixed(3));
+      setP(s, (Math.max(0, Math.min(1, p)) * 100).toFixed(1) + '%');
+      const hold = Math.max(0, Math.min(1, p)).toFixed(3);
+      if (s._hold !== hold) { s._hold = hold; s.style.setProperty('--hold', hold); }
     }
-    this.wordEls.forEach((w, i) => { if (i < k) w.style.setProperty('--p', '100%'); });
+    const W = this.wordEls;
+    for (let i = 0; i < k && i < W.length; i++) setP(W[i], '100%');
   }
   echo(span) {
     const L = this.el.lyric, a = span.getBoundingClientRect(), b = L.getBoundingClientRect();
@@ -204,11 +211,11 @@ export class UI {
   }
 
   // ── now playing / transport ────────────────────────────────────────
-  nowPlaying(title, sub) { this.el.title.textContent = title; this.el.sub.textContent = sub; document.title = title + ' · The Loft'; }
-  setPlaying(on) { this.el.play.classList.toggle('playing', on); document.body.classList.toggle('is-playing', on); }
+  nowPlaying(title, sub) { this.el.title.textContent = title; this.el.sub.textContent = sub; document.title = title + ' · The Visualizer'; }
+  setPlaying(on) { this.el.play.classList.toggle('playing', on); document.body.classList.toggle('is-playing', on); if (on && this._wake) this._wake(false); }   // (a song starting on its own counts as a fresh start of the idle clock)
   setShuffle(on) { document.getElementById('shuffle-btn').classList.toggle('on', on); }
   setStats({ bpm, fps }) {
-    if (bpm !== undefined) this.el.bpm.textContent = bpm ? `${bpm.toFixed(1)} BPM` : '— BPM';
+    if (bpm !== undefined) this.el.bpm.textContent = bpm ? `${bpm.toFixed(1)} BPM` : 'BPM';
     if (fps !== undefined) this.el.fps.textContent = `${Math.round(fps)} FPS`;
   }
 
@@ -219,18 +226,42 @@ export class UI {
     this.el.list.innerHTML = '';
     this._pick = onPick;
     const rank = [...tracks.keys()].sort((a, b) => (tracks[a].disliked - tracks[b].disliked) || ((tracks[b].plays || 0) - (tracks[a].plays || 0)) || tracks[a].name.localeCompare(tracks[b].name));
+    const allChills = this.allChills ? this.allChills() : {};   // (read once for the whole list)
     rank.forEach((i, r) => {
       const t = tracks[i];
       const li = document.createElement('li');
       li.className = (i === current ? 'cur' : '') + (t.disliked ? ' disliked' : '');
       li.dataset.i = i;
-      li.dataset.q = t.name.toLowerCase();
+      li.dataset.q = (t.name + ' ' + (this.pretty ? this.pretty(t.name) : '')).toLowerCase();
+      const ch = allChills[t.name] || [];
+      const chill = ch.length ? `<button class="tag chill" title="Play it from your first chill">✦ ${ch.length}</button>` : '';
       const heard = t.plays ? `<span class="plays" title="Times you've heard it">${t.plays}×</span>` : '';
-      li.innerHTML = `<span class="n">${String(r + 1).padStart(2, '0')}</span><span class="t">${esc(t.name)}</span>${heard}`;
-      li.onclick = () => onPick(i);
+      const fresh = t.isNew && !t.disliked && (t.plays || 0) < 2 ? '<span class="tag new" title="New: plays first until heard twice">NEW</span>' : '';
+      const undo = t.disliked ? '<button class="tag undo" title="Let it come up in shuffle again">NOT FOR ME ↺</button>' : '';
+      // (the + at the end of a row lines the song up after this one: a thing to click, where it used to be a right-click only)
+      li.innerHTML = `<span class="n">${String(r + 1).padStart(2, '0')}</span><span class="t">${esc(this.pretty ? this.pretty(t.name) : t.name)}</span>${undo}${fresh}${chill}${heard}<button class="q">+</button>`;
+      li.querySelector('.q').onclick = (e) => { e.stopPropagation(); if (this.onQueue) this.onQueue(i); };
+      if (chill) li.querySelector('.chill').onclick = (e) => { e.stopPropagation(); this.onChill && this.onChill(i); this.toggleDrawer(false); };
+      if (undo) li.querySelector('.undo').onclick = (e) => { e.stopPropagation(); this.onUndislike && this.onUndislike(i); };
+      li.onclick = () => { onPick(i); this.toggleDrawer(false); };   // (a pick is the whole errand: the list closes itself and the room is back)
+      // (a short rest, not a pass: sweeping the mouse down the list loads nothing)
+      li.onmouseenter = () => { clearTimeout(this._hoverT); this._hoverT = setTimeout(() => this.onHover && this.onHover(i), 150); };
+      li.onmouseleave = () => clearTimeout(this._hoverT);
+      li.oncontextmenu = (e) => { e.preventDefault(); if (this.onQueue) this.onQueue(i); };
       this.el.list.appendChild(li);
     });
     this.filterTracks();
+    this.setQueue(this._queue || []);
+  }
+  // Queued songs wear their place in line on their + key (a second click, or a right-click, takes one out).
+  setQueue(q) {
+    this._queue = q;
+    for (const li of this.el.list.children) {
+      const at = q.indexOf(+li.dataset.i), key = li.querySelector('.q');
+      li.classList.toggle('queued', at >= 0);
+      li.dataset.qn = at >= 0 ? at + 1 : '';
+      if (key) { key.textContent = at >= 0 ? at + 1 : '+'; key.title = at >= 0 ? `Number ${at + 1} in your queue. Click to take it out.` : 'Play it after this song'; }
+    }
   }
   filterTracks() {
     const q = (this.el.search?.value || '').trim().toLowerCase(), words = q.split(/\s+/).filter(Boolean);
@@ -241,6 +272,7 @@ export class UI {
   firstMatch() { const li = [...this.el.list.children].find((l) => !l.hidden); return li ? +li.dataset.i : -1; }
   toggleDrawer(force) {
     const open = this.el.drawer.classList.toggle('open', force);
+    document.body.classList.toggle('drawer-open', open);
     if (open) {
       if (this.onDrawerOpen) this.onDrawerOpen();
       const s = this.el.search;
@@ -258,15 +290,16 @@ export class UI {
     const body = document.body.classList;
     if (body.contains('idle') || body.contains('bare')) return;
     const cv = this.el.seek, dpr = Math.min(2, window.devicePixelRatio || 1);
-    const w = cv.clientWidth, h = cv.clientHeight;
-    const key = `${Math.round((t / (this.duration || 1)) * w * dpr)}|${w}|${h}|${dpr}|${this.accent}|${this.seekVersion || 0}`;   // a redraw per device pixel the playhead moves
+    const w = cv.clientWidth, h = cv.clientHeight, chills = (this.chills && this.chills()) || [];
+    const key = `${chills.length}|${Math.round((t / (this.duration || 1)) * w * dpr)}|${w}|${h}|${dpr}|${this.seekVersion || 0}`;   // a redraw per device pixel the playhead moves
     if (key === this._seekKey) return;
     this._seekKey = key;
     if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
     const g = this.seekCtx, D = this.duration || 1;
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, w, h);
-    const accent = this.accent || 'rgb(120, 200, 255)';
+    //  black; the mood's own colour stays with the lyric words and the room)
+    const BLUE = '#6b8cff', RED = '#ff4d6a';
     const mid = h / 2;
     g.fillStyle = 'rgba(255,255,255,0.07)';
     g.fillRect(0, mid - 2, w, 4);
@@ -275,7 +308,6 @@ export class UI {
         const x0 = (s.start / D) * w, x1 = (s.end / D) * w, hh = 3 + s.energy * (h * 0.55);
         g.fillStyle = `rgba(255,255,255,${0.06 + s.energy * 0.16})`;
         g.fillRect(x0 + 1, mid - hh / 2, Math.max(1, x1 - x0 - 2), hh);
-        if (s.drop) { g.fillStyle = accent; g.fillRect(x0, 2, 2, h - 4); }
       }
       g.fillStyle = 'rgba(255,255,255,0.22)';
       for (const d of this.map.downbeats) g.fillRect((d / D) * w, mid - 1, 1, 2);
@@ -284,16 +316,23 @@ export class UI {
     for (const l of this.lines) g.fillRect((l.t / D) * w, h - 3, Math.max(1, ((l.end - l.t) / D) * w - 1), 2);
     const px = (t / D) * w;
     g.globalCompositeOperation = 'source-atop';
-    g.fillStyle = accent;
-    g.globalAlpha = 0.55;
+    g.fillStyle = BLUE;
+    g.globalAlpha = 0.72;
     g.fillRect(0, 0, px, h);
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'source-over';
+    g.fillStyle = BLUE; g.fillRect(0, mid - 1, px, 2);   // (and one crisp blue line through the middle, so how far it has come reads at a glance)
+    // the drops ahead keep their red, and your chills (X) are small sharp white points along the top, the moments to come
+    if (this.map) { g.fillStyle = RED; for (const s of this.map.sections) if (s.drop) g.fillRect((s.start / D) * w, 2, 2, h - 4); }
     g.fillStyle = '#fff';
-    g.shadowColor = accent; g.shadowBlur = 10;
+    for (const c of chills) { g.beginPath(); g.arc((c / D) * w, 3.5, 2.5, 0, Math.PI * 2); g.fill(); }
     g.fillRect(px - 1, 0, 2, h);
-    g.shadowBlur = 0;
-    this.el.time.textContent = `${fmt(t)} / ${fmt(this.duration)}`;
+    this.el.tNow.textContent = fmt(t);
+    // the last 20 s: what comes next, under the title
+    const ending = this.duration > 40 && this.duration - t < 20 && this.upNext ? this.upNext() : '';
+    const nowEl = this.el.title.parentElement;
+    if (ending) { const nx = $('np-next'), txt = 'NEXT · ' + ending; if (nx.textContent !== txt) nx.textContent = txt; }
+    nowEl.classList.toggle('ending', !!ending); this.el.time.textContent = '-' + fmt(this.duration - t);
   }
   _wireSeek() {
     const cv = this.el.seek;
@@ -302,18 +341,42 @@ export class UI {
     cv.addEventListener('pointerdown', (e) => { drag = true; cv.setPointerCapture(e.pointerId); this.onSeek && this.onSeek(at(e)); });
     cv.addEventListener('pointermove', (e) => { if (drag) this.onSeek && this.onSeek(at(e)); });
     cv.addEventListener('pointerup', () => { drag = false; });
+    // Hover: the time under the pointer, and the section it falls in when the map knows.
+    const tip = $('seek-tip');
+    cv.addEventListener('pointermove', (e) => {
+      const r = cv.getBoundingClientRect(), t = at(e);
+      tip.style.left = Math.max(20, Math.min(r.width - 20, e.clientX - r.left)) + 'px';
+      tip.textContent = fmt(t) + ((this.chills && this.chills() || []).some((c) => Math.abs(c - t) < this.duration / 80) ? '  · chills' : '');
+    });
   }
 
   // ── idle hide ──────────────────────────────────────────────────────
   _wireIdle() {
-    const wake = () => {
-      document.body.classList.remove('idle');
+    // The player bar, the top bar and the cursor fade out after a few still seconds while music plays,
+    // and come back the moment the mouse moves or a key is pressed.
+    const fs = () => document.body.classList.contains('fs');
+    const hide = () => { if (document.body.classList.contains('is-playing') && !this.el.drawer.classList.contains('open')) document.body.classList.add('idle'); };
+    const wake = (show = true) => {
+      if (show) document.body.classList.remove('idle');
       clearTimeout(this._idleTimer);
       this._idleTimer = setTimeout(() => {
-        if (document.body.classList.contains('is-playing') && !this.el.drawer.classList.contains('open')) document.body.classList.add('idle');
-      }, 2800);
+        // (in a window a mouse resting on the controls keeps them; in full screen a still mouse always lets them go,
+        //  wherever it rests: the key that starts full screen sits in the player, so the mouse is resting on it)
+        if (this._over && !fs()) return wake(false);
+        hide();
+      }, fs() ? 2500 : 3500);
     };
-    ['pointermove', 'pointerdown', 'keydown'].forEach((ev) => window.addEventListener(ev, wake, { passive: true }));
+    this._wake = wake;
+    // Full screen just began: the player fades at once. The small slip of the hand that ends the click is not "moving the
+    // mouse", so moves are not counted for a moment.
+    this._quietUntil = 0;
+    this.hideNow = () => { clearTimeout(this._idleTimer); this._quietUntil = performance.now() + 600; hide(); };
+    this._over = 0;
+    for (const el of [this.el.hud, document.getElementById('brand')]) {
+      el.addEventListener('pointerenter', () => { this._over++; });
+      el.addEventListener('pointerleave', () => { this._over = Math.max(0, this._over - 1); });
+    }
+    ['pointermove', 'pointerdown', 'keydown'].forEach((ev) => window.addEventListener(ev, () => { if (ev !== 'pointermove' || performance.now() >= this._quietUntil) wake(); }, { passive: true }));
     wake();
   }
 }

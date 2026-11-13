@@ -30,15 +30,21 @@ export function makeSky(pal) {
   const uniforms = {
     uTime: { value: 0 }, uEnergy: { value: 0 }, uLow: { value: 0 }, uMid: { value: 0 }, uFlash: { value: 0 }, uKick: { value: 0 }, uBolt: { value: 0 }, uBoltDir: { value: new THREE.Vector2(1, 0) },
     uFx: { value: new THREE.Vector4() },  // rain, embers, aurora, haze
-    uStarCut: { value: 0.987 }, uArc: { value: 0 }, uEmberT: { value: 0 },           // how full the night is (the feelings: loneliness empties it)
-    uNeb: { value: null }, uNebOn: { value: 0 },
+    uStarCut: { value: 0.987 }, uHat: { value: 0 }, uShootT: { value: -99 }, uShootA: { value: new THREE.Vector3(1, 0.3, 0) }, uShootB: { value: new THREE.Vector3(0, 0.5, 1) }, uArc: { value: 0 }, uEmberT: { value: 0 },           // how full the night is (the feelings: loneliness empties it)
+    uNeb: { value: null }, uNebOn: { value: 0 }, uNoise: { value: null },
+    uNeb2: { value: null }, uNebMix: { value: 0 },   // another nebula fading in (nebula() below)
+    uNebBase: { value: null },   // the locked nebula, always (the floor's dust: the variants' bands and pillars laid flat read as streaks)
     uBoltTex: { value: null }, uBoltI: { value: 0 }, uGal: { value: null }, uGalOn: { value: 0 },   // Blender's lightning strikes and spiral galaxy   // the nebula's gas, rendered in Blender's Cycles (tools/blender/nebula.py)
     ...pal,
   };
-  new THREE.TextureLoader().load('assets/textures/nebula.png', (t) => {
+  // The nebula and its variants (nebula.py's NEB_STYLE): the locked one every song opens on,
+  // then a river of gas round the horizon, then towering pillars of it.
+  const nebs = [];
+  ['nebula.png', 'nebula-band.png', 'nebula-pillars.png'].forEach((file, i) => new THREE.TextureLoader().load('assets/textures/' + file, (t) => {
     t.colorSpace = THREE.NoColorSpace; t.generateMipmaps = false; t.minFilter = THREE.LinearFilter; t.wrapS = THREE.RepeatWrapping;
-    uniforms.uNeb.value = t; uniforms.uNebOn.value = 1;
-  });
+    nebs[i] = t;
+    if (i === 0) { uniforms.uNeb.value = t; uniforms.uNebBase.value = t; uniforms.uNebOn.value = 1; }
+  }));
   fxTexture('bolt.png', (t) => { uniforms.uBoltTex.value = t; }, { atlas: true });
   fxTexture('galaxy.png', (t) => { uniforms.uGal.value = t; uniforms.uGalOn.value = 1; });
   const mat = new THREE.ShaderMaterial({
@@ -50,12 +56,16 @@ export function makeSky(pal) {
       uniform float uTime, uEnergy, uLow, uMid, uFlash, uKick, uBolt;
       uniform vec2 uBoltDir;
       uniform vec4 uFx;
-      uniform float uStarCut, uArc, uEmberT, uNebOn, uBoltI, uGalOn;
-      uniform sampler2D uNeb, uBoltTex, uGal;
+      uniform float uStarCut, uArc, uEmberT, uNebOn, uBoltI, uGalOn, uNebMix;
+      uniform sampler2D uNeb, uNeb2, uBoltTex, uGal, uNoise;
       varying vec3 vDir;
       ${RAMP}
       ${VALUE_NOISE}
       float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      // Points of light on the night (stars, dust, rain) lean pink: a small red point on the blue reads orange.
+      vec3 pinkPoint(vec3 c){ c.b = max(c.b, 0.45 * c.r); c.g = min(c.g, c.b); return c; }
+      uniform float uHat, uShootT;
+      uniform vec3 uShootA, uShootB;
       void main(){
         vec3 d = normalize(vDir);
         float up = d.y * 0.5 + 0.5;
@@ -64,9 +74,11 @@ export function makeSky(pal) {
         vec3 col = mix(uRamp[1] * 0.3, uRamp[0] * 0.6, smoothstep(0.5, 1.0, up));
         // Deep below the horizon the floor hides the sky: no noise is paid for there.
         if (d.y < -0.42) { gl_FragColor = vec4(col * 0.15, 1.0); return; }
+        // ...nor where the glass floor (4.2 below the core, opaque out to 70 units) covers it.
+        if (d.y < 0.0 && cameraPosition.y > -4.2) { vec2 hit = cameraPosition.xz + d.xz * ((cameraPosition.y + 4.2) / -d.y); if (dot(hit, hit) < 3600.0) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; } }
         // Nebula: a body in the mid tones, filaments in the bright tones and the accent.
-        float n1 = fbm(d * 2.1 + vec3(0.0, uTime * 0.015, 0.0));
-        float n2 = fbm(d * 3.7 + n1 * 1.9 + vec3(uTime * 0.02, 0.0, 0.0));
+        vec2 nn = texture2D(uNoise, vec2(az / 6.28318 + 0.5, asin(clamp(d.y, -1.0, 1.0)) / 3.14159 + 0.5)).rg;   // (baked: see bake())
+        float n1 = nn.x, n2 = nn.y;
         col += glow(0.3 + 0.45 * n2) * 0.06 * smoothstep(0.38, 0.95, n2) * (0.6 + 0.4 * uEnergy);
         float fil = pow(smoothstep(0.6, 1.0, n2), 3.0) * (0.4 + 0.6 * uEnergy + 0.4 * uLow + 0.9 * uMid) * (1.0 + 0.6 * uArc);   // the melody lights the nebula; a part climbing lights it more
         col += mix(glow(0.85), glowOf(uAccent, 0.9), smoothstep(0.7, 0.9, n1)) * 0.28 * fil;
@@ -77,7 +89,9 @@ export function makeSky(pal) {
           float ra = uTime * 0.004, cr = cos(ra), sr = sin(ra);
           vec3 rd = vec3(cr * d.x - sr * d.z, d.y, sr * d.x + cr * d.z);
           vec2 nuv = vec2(atan(rd.z, rd.x) / 6.28318 + 0.5, asin(clamp(rd.y, -1.0, 1.0)) / 3.14159 + 0.5);
-          float gas = smoothstep(0.26, 0.7, texture2D(uNeb, nuv).r);
+          float neb = texture2D(uNeb, nuv).r;
+          if (uNebMix > 0.0) neb = mix(neb, texture2D(uNeb2, nuv).r, uNebMix);   // (a new sky fading in)
+          float gas = smoothstep(0.26, 0.7, neb);
           vec3 gc = mix(glow(0.32), glowOf(uAccent, 0.85), gas * gas);
           col += gc * gas * 0.5 * (0.6 + 0.35 * uEnergy + 0.5 * uMid + 0.3 * uArc);
         }
@@ -104,18 +118,9 @@ export function makeSky(pal) {
           float r = h21(vec2(id.x, 0.0));
           float y = fract(g.y + r * 13.0);
           float streak = step(0.82, r) * smoothstep(0.0, 0.15, y) * smoothstep(0.55, 0.15, y) * smoothstep(0.45, 0.0, abs(fract(g.x) - 0.5));
-          col += glow(0.9) * streak * 0.16 * uFx.x * smoothstep(-0.2, 0.3, d.y);
+          col += pinkPoint(glow(0.9)) * streak * 0.16 * uFx.x * smoothstep(-0.2, 0.3, d.y);
         }
-        // Embers: sparks rising from below, flaring on the kick.
-        if (uFx.y > 0.01) {
-          vec2 g = vec2(az * 60.0, d.y * 24.0 - uEmberT);   // a phase the CPU integrates, so a change of energy never jumps the field
-          vec2 id = floor(g);
-          float r = h21(id);
-          vec2 f = fract(g) - 0.5 - (vec2(h21(id + 3.1), h21(id + 7.7)) - 0.5) * 0.6;
-          float ember = step(0.93, r) * smoothstep(0.12, 0.0, length(f));
-          ember *= 0.6 + 0.4 * sin(uTime * (6.0 + r * 9.0) + r * 40.0);
-          col += mix(glowOf(uAccent, 1.0), glow(1.0), r) * ember * (0.7 + 1.2 * uKick) * uFx.y * smoothstep(0.6, -0.1, d.y);
-        }
+        // (Embers, sparks painted on the sky low behind the core, were taken out: flat specks, no feeling.)
         // Depth: the far universe, turning slowly behind everything. A faint band of a
         // galaxy across the sky (its dust lane dark through the middle), a dust of
         // countless far stars, and now and then a near star with a soft glint.
@@ -146,19 +151,28 @@ export function makeSky(pal) {
         col += glow(0.55) * galaxy * lane * 0.035;
         vec3 fg = sd * 420.0, fid = floor(fg);
         float fr = hash13(fid);
-        col += glow(0.9) * smoothstep(0.985 - 0.02 * galaxy, 0.99, fr) * smoothstep(0.5, 0.0, length(fract(fg) - 0.5)) * 0.35 * (0.4 + galaxy);
+        col += pinkPoint(glow(0.9)) * smoothstep(0.985 - 0.02 * galaxy, 0.99, fr) * smoothstep(0.5, 0.0, length(fract(fg) - 0.5)) * 0.35 * (0.4 + galaxy);
         vec3 ng = sd * 38.0, nid = floor(ng);
         float nr = hash13(nid);
         vec3 nf = fract(ng) - 0.5;
         float near = step(0.992, nr) * (exp(-dot(nf, nf) * 90.0) + 0.25 * exp(-abs(nf.x) * 60.0 - abs(nf.y) * 6.0) + 0.25 * exp(-abs(nf.y) * 60.0 - abs(nf.x) * 6.0));
-        col += glow(1.0) * near * 0.5 * (0.8 + 0.2 * sin(uTime * 0.7 + nr * 50.0));
+        col += pinkPoint(glow(1.0)) * near * 0.5 * (0.8 + 0.2 * sin(uTime * 0.7 + nr * 50.0));
         // Stars wear the highlight tone.
         vec3 g = sd * 170.0;
         vec3 id = floor(g);
         float r = hash13(id);
         float star = smoothstep(uStarCut, uStarCut + 0.002, r) * smoothstep(0.42, 0.0, length(fract(g) - 0.5));
         star *= 0.55 + 0.45 * sin(uTime * (2.0 + r * 5.0) + r * 80.0);
-        col += glow(1.0) * star * (0.75 + uFlash * 3.0) * (1.0 - 0.6 * uFx.x);
+        col += pinkPoint(glow(1.0)) * star * (0.75 + uFlash * 3.0 + uHat * step(0.5, fract(r * 37.0)) * 1.6) * (1.0 - 0.6 * uFx.x);
+        // A shooting star (rare: see visuals.js): a bright head with a fading tail, across the sky in under a second.
+        float sa = uTime - uShootT;
+        if (sa > 0.0 && sa < 1.1) {
+          float p = sa / 0.9;
+          vec3 head = normalize(mix(uShootA, uShootB, min(p, 1.0))), tail = normalize(mix(uShootA, uShootB, max(p - 0.22, 0.0)));
+          vec3 ab = head - tail; float tt = clamp(dot(d - tail, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+          float dist = length(d - (tail + ab * tt));
+          col += pinkPoint(glow(1.0)) * 4.5 * tt * exp(-dist * dist * 1.5e5) * (1.0 - smoothstep(0.85, 1.1, sa));
+        }
         // Lightning: a stretch of the far horizon flickers cold white-blue, from one side.
         if (uBolt > 0.01) {
           float side = dot(normalize(d.xz + 1e-4), uBoltDir);
@@ -181,20 +195,108 @@ export function makeSky(pal) {
   const mesh = new THREE.Mesh(new THREE.SphereGeometry(300, 48, 32), mat);
   mesh.renderOrder = -10;
   mesh.frustumCulled = false;
-  return { mesh, uniforms };
+  // The nebula's two noise fields are soft and drift slowly, yet cost 80 hashes a pixel
+  // over the whole screen (the sky was half the scene's draw). They're baked each frame
+  // into a small map of the whole sky (1024x512, a ninth of the pixels) and looked up.
+  const rt = new THREE.WebGLRenderTarget(1024, 512, { type: THREE.HalfFloatType, depthBuffer: false, magFilter: THREE.LinearFilter, minFilter: THREE.LinearFilter, generateMipmaps: false });
+  rt.texture.wrapS = THREE.RepeatWrapping;
+  uniforms.uNoise.value = rt.texture;
+  const bakeU = { uTime: uniforms.uTime };
+  const bakeScene = new THREE.Scene(), bakeCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  bakeScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
+    uniforms: bakeU, depthTest: false, depthWrite: false,
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    fragmentShader: /* glsl */ `
+      uniform float uTime;
+      varying vec2 vUv;
+      ${VALUE_NOISE}
+      void main(){
+        float lon = (vUv.x - 0.5) * 6.28318, lat = (vUv.y - 0.5) * 3.14159;
+        vec3 d = vec3(cos(lat) * cos(lon), sin(lat), cos(lat) * sin(lon));
+        float n1 = fbm(d * 2.1 + vec3(0.0, uTime * 0.015, 0.0));
+        float n2 = fbm(d * 3.7 + n1 * 1.9 + vec3(uTime * 0.02, 0.0, 0.0));
+        gl_FragColor = vec4(n1, n2, 0.0, 1.0);
+      }`,
+  })));
+  let bakedT = -1;
+  function bake(renderer) {
+    if (Math.abs(uniforms.uTime.value - bakedT) < 1 / 30) return;   // (it drifts slowly: 30 bakes a second is plenty)
+    bakedT = uniforms.uTime.value;
+    const was = renderer.getRenderTarget();
+    renderer.setRenderTarget(rt); renderer.render(bakeScene, bakeCam); renderer.setRenderTarget(was);
+  }
+  // A new sky: the nebula `i` fades in over six seconds (the room answers slowly), or at
+  // once (snap: a new song opens on the locked one). One not loaded yet is skipped.
+  let fade = null;
+  const settle = () => { if (fade) { uniforms.uNeb.value = fade.to; uniforms.uNebMix.value = 0; fade = null; } };
+  function nebula(i, snap = false) {
+    const to = nebs[i];
+    if (!to) return;
+    settle();
+    if (to === uniforms.uNeb.value) return;
+    if (snap) { uniforms.uNeb.value = to; return; }
+    uniforms.uNeb2.value = to; fade = { to, p: 0 };
+  }
+  function nebulaStep(dt) {
+    if (!fade) return;
+    fade.p = Math.min(1, fade.p + dt / 6);
+    uniforms.uNebMix.value = fade.p * fade.p * (3 - 2 * fade.p);
+    if (fade.p >= 1) settle();
+  }
+  return { mesh, uniforms, bake, nebula, nebulaStep };
 }
 
 // ── Floor: neon grid. Every kick drops a shockwave ring that rolls outward.
 export const RIPPLES = 16;
+export const RIPPLE_LIFE = 8;   // seconds a ring rolls on (well past the bars, where it has faded to nothing)
+// One ring like a real one: it keeps travelling, lower and wider as it spreads over a bigger
+// circle, and fades away slowly. Height and slope come out of the same pass (the slope gives
+// the glass its smooth shading), so a ring costs one loop, not three.
+const WAVES_GLSL = /* glsl */ `
+  // tanh that can't overflow: Windows' graphics layer builds tanh from exp(2x), which turns into
+  // Inf/Inf = NaN past x ~ 44, and a NaN vertex drops its triangles out as black blocks.
+  float stanh(float x){ float e = exp(2.0 * clamp(x, -9.0, 9.0)); return (e - 1.0) / (e + 1.0); }
+  vec2 waves(float d){
+    float h = 0.0, s = 0.0, edge = smoothstep(0.0, 4.0, d);
+    for (int i = 0; i < ${RIPPLES}; i++){
+      float age = uTime - uRipT[i];
+      if (age < 0.0 || age > ${RIPPLE_LIFE}.0) continue;
+      // Inside the ring of bars a wave rolls out tall and strong (rising toward the core);
+      // past the bars it runs out of room: lower, wider, fading into the dark.
+      float front = age * 14.0, x = d - front, past = max(d - 25.0, 0.0), k = 0.18 / (1.0 + past * 0.04);
+      float g = uRipA[i] * 1.5 * exp(-age * 0.12) * exp(-past * 0.07) * exp(-x * x * k) * smoothstep(${RIPPLE_LIFE}.0, ${RIPPLE_LIFE}.0 - 2.0, age);
+      h += g; s -= g * 2.0 * k * x;
+    }
+    return vec2(h, s) * edge;
+  }
+  // How high the surface really stands at world point w0 (the floor and the strings riding it share
+  // this, so the grid never parts from the liquid): a soft ceiling of 3, flattened right by the
+  // camera, settled at the ring of bars, and kept below a low camera's eye line, softly and only
+  // near the camera (it was a hard cut across the whole floor that moved with the camera's sway:
+  // crests sliced flat into blocks, the flat tops trembling, the strings tearing off them).
+  float rideH(float h, float d, vec3 w0){
+    h = 3.0 * stanh(h / 3.0);
+    vec3 toCam = w0 - cameraPosition;
+    h *= smoothstep(3.0, 13.0, length(toCam));
+    float lim = max(abs(toCam.y) - 1.2, 0.0) * 0.5, near = 1.0 - smoothstep(8.0, 18.0, length(toCam.xz));
+    if (h > 0.0 && near > 0.0) h = mix(h, lim * stanh(h / max(lim, 0.05)), near);
+    return h * (1.0 - 0.85 * exp(-(d - 25.0) * (d - 25.0) * 0.12));
+  }`;
 export function makeFloor(pal) {
   const uniforms = {
     uTime: { value: 0 }, uRipT: { value: new Array(RIPPLES).fill(-100) }, uRipA: { value: new Array(RIPPLES).fill(0) },
-    uLow: { value: 0 }, uEnergy: { value: 0 }, uHeart: { value: 0.8 }, uVoid: { value: 0 },
+    uLow: { value: 0 }, uEnergy: { value: 0 }, uHeart: { value: 0.8 }, uVoid: { value: 0 }, uWob: { value: 0 }, uBend: { value: 0 },
+    // The black mirror (2026-11-05, beside the grid, never over it): 0 is the grid as it was; 1 is the still black liquid,
+    // the fine grid gone, a whisper of the coarse one, and each ripple's rings caught as light on the surface (visuals.js eases it).
+    uMirror: { value: 0 },
     // The backbeat's bands of light (makeStrings rings them; they sweep through this grid).
     uPluck: { value: new Array(8).fill(0) }, uPluckT: { value: new Array(8).fill(-100) }, uPluckCol: { value: new THREE.Color() }, uPluckK: { value: 0 },
     // The core's light on the floor (visuals.js): its colour and strength, and the wall's.
     uCoreCol: { value: new THREE.Color() }, uCoreLight: { value: 0 }, uWallCol: { value: new THREE.Color() }, uGridFlash: { value: 0 },
     uDrops: { value: Array.from({ length: 40 }, () => new THREE.Vector4(0, 0, -99, 0)) },
+    // (the shader hears only the drops still ringing, packed first: visuals.js fills these from uDrops)
+    uDropLive: { value: Array.from({ length: 40 }, () => new THREE.Vector4(0, 0, -99, 0)) }, uDropN: { value: 0 },
+    uNeb: { value: null }, uNebOn: { value: 0 }, uNeb2: { value: null }, uNebMix: { value: 0 }, uNebBase: { value: null },   // the sky's nebula (visuals.js shares it): the glass mirrors it
     uCaus: { value: null }, uRip: { value: null }, uFxOn: { value: 0 },   // Blender's caustics and the raindrop's simulated ripple   // raindrops landing on the void: x, z, when, how hard
     ...pal,
   };
@@ -205,25 +307,24 @@ export function makeFloor(pal) {
     uniforms, transparent: true, depthWrite: false,   // (never writes depth: the core at its biggest dips past the floor and must stay whole)
       // (the underside: the other timeline's ceiling)
     vertexShader: /* glsl */ `
-      uniform float uTime, uRipT[${RIPPLES}], uRipA[${RIPPLES}], uLow;
-      varying vec3 vWorld; varying float vH;
+      uniform float uTime, uRipT[${RIPPLES}], uRipA[${RIPPLES}], uLow, uWob, uBend;
+      varying vec3 vWorld; varying float vH; varying vec3 vN;
+      ${WAVES_GLSL}
       void main(){
         vec3 p = position;
-        float d = length(p.xz), h = 0.0;
-        for (int i = 0; i < ${RIPPLES}; i++){
-          float age = uTime - uRipT[i];
-          if (age < 0.0 || age > 7.0) continue;
-          float front = age * 14.0;
-          h += uRipA[i] * exp(-age * 0.6) * exp(-(d - front) * (d - front) * 0.18) * smoothstep(0.0, 4.0, d);
-        }
+        float d = length(p.xz);
+        vec2 hs = waves(d);
+        // The womp's pump round the core (a speaker cone) and the whammy's dive and climb.
+        float pump = uWob * 1.1 * exp(-(d - 10.0) * (d - 10.0) * 0.025), bendH = uBend * 1.6 * exp(-d * d * 0.005) * smoothstep(2.0, 7.0, d);
+        float h = hs.x + pump + bendH;
+        // The surface's slope, from the wave itself (smooth, unlike a triangle's facet).
+        float th = stanh(h / 3.0), slope = (hs.y - pump * 0.05 * (d - 10.0) - bendH * 0.01 * d) * (1.0 - th * th);
+        vec2 dr = p.xz / max(d, 1e-3);
+        vN = normalize(vec3(-dr.x * slope, 1.0, -dr.y * slope));
         // A wave never rises into the core's light (a soft ceiling: a tall swell between
         // the camera and the core hid its lower half), and it lies down as it nears the
         // camera instead of washing through the lens.
-        h = 2.0 * tanh(h / 2.0);
-        vec4 w0 = modelMatrix * vec4(position, 1.0);
-        h *= smoothstep(3.0, 13.0, length(w0.xyz - cameraPosition));   // (true distance: a high aerial camera never flattens the middle)
-        h = min(h, max(abs(cameraPosition.y - w0.y) - 1.2, 0.0) * 0.5);   // a crest never rises to a low camera's eye line (it clipped through the lens)
-        h *= 1.0 - 0.85 * exp(-(d - 25.0) * (d - 25.0) * 0.12);       // and settles at the ring of bars instead of cutting through their feet
+        h = rideH(h, d, (modelMatrix * vec4(position, 1.0)).xyz);   // (up to 3 units: tall, never into the core or the lens)
         p.y += h;
         vH = h;
         vec4 w = modelMatrix * vec4(p, 1.0);
@@ -237,13 +338,17 @@ export function makeFloor(pal) {
     fragmentShader: /* glsl */ `
       uniform float uEnergy, uLow, uHeart, uVoid, uTime, uPluck[8], uPluckT[8], uPluckK;
       uniform vec3 uPluckCol, uCoreCol, uWallCol;
-      uniform float uCoreLight, uGridFlash, uFxOn;
-      uniform vec4 uDrops[40];
-      uniform sampler2D uCaus, uRip;
+      uniform float uCoreLight, uGridFlash, uFxOn, uNebOn, uNebMix, uMirror;
+      uniform vec4 uDropLive[40];
+      uniform int uDropN;
+      uniform sampler2D uCaus, uRip, uNeb, uNeb2, uNebBase;
+      // The nebula at uv, with a new one fading in over it (the sky's nebula()).
+      float nebAt(vec2 uv){ float n = texture2D(uNeb, uv).r; return uNebMix > 0.0 ? mix(n, texture2D(uNeb2, uv).r, uNebMix) : n; }
       // one frame of the ripple flipbook (4x4, frame 0 top-left), at local uv
       float ripAt(float i, vec2 uv){ float cx = mod(i, 4.0), cy = floor(i / 4.0); return texture2D(uRip, vec2((cx + uv.x) * 0.25, 1.0 - (cy + 1.0 - uv.y) * 0.25)).r; }
-      varying vec3 vWorld; varying float vH;
+      varying vec3 vWorld; varying float vH; varying vec3 vN;
       ${RAMP}
+      ${VALUE_NOISE}
       vec2 lines(vec2 p, float s){
         vec2 q = p / s;
         vec2 g = abs(fract(q - 0.5) - 0.5) / max(fwidth(q), 1e-4);
@@ -251,14 +356,15 @@ export function makeFloor(pal) {
       }
       void main(){
         float d = length(vWorld.xz);
+        if (d > 150.0) discard;   // (fully faded out there: no work for pixels nobody sees)
         vec2 dir = vWorld.xz / max(d, 1e-3);
         vec2 q = vWorld.xz - dir * vH * 1.4;   // the wave carries the grid with it
-        vec2 f = lines(q, 2.0), c = lines(q, 10.0);
+        vec2 c = lines(q, 10.0), f = uMirror < 0.99 ? lines(q, 2.0) : vec2(0.0);   // (the mirror has no fine grid: none drawn)
         // Lines packed too tight to read as lines (far off, or seen edge-on) fade away
         // instead of merging into a solid sheet of colour.
         vec2 wf = fwidth(q);
-        float fineK = 1.0 - smoothstep(0.12, 0.45, max(wf.x, wf.y) / 2.0), coarseK = 1.0 - smoothstep(0.12, 0.45, max(wf.x, wf.y) / 10.0);
-        float fine = max(f.x, f.y) * fineK, coarse = max(c.x, c.y) * coarseK, node = f.x * f.y * fineK + 1.5 * c.x * c.y * coarseK;
+        float fineK = (1.0 - smoothstep(0.12, 0.45, max(wf.x, wf.y) / 2.0)) * (1.0 - uMirror), coarseK = 1.0 - smoothstep(0.12, 0.45, max(wf.x, wf.y) / 10.0);
+        float fine = max(f.x, f.y) * fineK, coarse = max(c.x, c.y) * coarseK * (1.0 - 0.7 * uMirror), node = f.x * f.y * fineK + mix(1.5, 1.2, uMirror) * c.x * c.y * coarseK;
         float band = 0.0;
         for (int k = 0; k < 8; k++) {
           float age = uTime - uPluckT[k];
@@ -272,19 +378,35 @@ export function makeFloor(pal) {
         lineCol = mix(lineCol, lit, clamp(abs(vH) * 0.9 + band, 0.0, 1.0));
         float l = dot(lineCol, vec3(0.2126, 0.7152, 0.0722));
         lineCol = max(mix(vec3(l), lineCol, 1.4), 0.0);
-        // Caustics: where the waves move, the void's floor carries the light nets you see under
-        // moving water (rendered in Blender), two layers drifting across each other.
-        if (uFxOn > 0.5) {
-          float cw = smoothstep(0.04, 0.5, abs(vH)) * exp(-d * 0.02);
-          if (cw > 0.002) {
-            float cs = texture2D(uCaus, vWorld.xz * 0.045 + vec2(uTime * 0.012, uTime * 0.009)).r * texture2D(uCaus, vWorld.xz * 0.031 - vec2(uTime * 0.01, -uTime * 0.013) + 0.37).r;
-            col += glowOf(uAccent, 0.9) * cs * cw * 0.55;
-          }
+        // The floor is a still black liquid over deep space. Nothing under it moves on its
+        // own: far stars and faint dust hang at different depths (the eye's ray goes on
+        // through the surface, so deeper ones shift less as the camera moves), and a
+        // passing ripple from the core bends them with its slope.
+        vec3 v = normalize(vWorld - cameraPosition);
+        vec2 bend = dir * vH * 0.6;
+        vec2 thru = v.xz / max(-v.y, 0.12);
+        vec2 sp = vWorld.xz + bend;
+        float stars = 0.0;
+        for (int k = 0; k < 3; k++) {
+          if (d > 120.0) break;   // (past here the stars are under 3% and the floor is fading out)
+          float depth = 4.0 + 10.0 * float(k), sc = 1.6 - 0.45 * float(k);
+          vec2 g = (sp + thru * depth) * sc;
+          vec2 id = floor(g);
+          float r = hash13(vec3(id, float(k) * 7.1));
+          if (r < 0.965) continue;   // (most cells hold no star: no jitter paid for them)
+          vec2 f = fract(g) - 0.5 - (vec2(hash13(vec3(id, 3.3)), hash13(vec3(id, 5.7))) - 0.5) * 0.7;
+          stars += smoothstep(0.09, 0.0, length(f)) * (1.0 - 0.3 * float(k));
         }
-        float glowAmt = (fine * 0.2 + coarse * 0.5 + node * 0.9) * (0.17 + 0.12 * uEnergy + abs(vH) * 1.2 + band * 0.9);
+        float dust = 0.0;
+        if (uNebOn > 0.5) dust = smoothstep(0.3, 0.8, texture2D(uNebBase, (sp + thru * 18.0) * 0.0035 + 0.2).r);
+        float under = exp(-d * 0.03);
+        col += (glow(0.9) * stars * 0.5 + mix(glow(0.3), glowOf(uAccent, 0.8), dust) * dust * 0.07) * under;
+        // (a wave's height lights its lines, capped: at a drop the whole disc inside the bars stands tall, and uncapped
+        // every line burned white and the core was lost in it, 2026-11-05)
+        float glowAmt = (fine * 0.2 + coarse * 0.5 + node * 0.9) * (0.17 + 0.12 * uEnergy + min(abs(vH), 1.4) + band * 0.9);
         // A big drop's moment: the whole infinite grid flashes alight, then fades.
-        col += lineCol * glowAmt * 2.0 * exp(-d * 0.018 * (1.0 - 0.7 * uGridFlash)) * (1.0 + 4.0 * uGridFlash);
-        col += glowOf(uAccent, 0.8) * smoothstep(0.15, 1.6, vH) * 0.07 * exp(-d * 0.028);   // (a wave tints the void, it never floods it)
+        // (under the core the lines dim to half: at a drop they stood tallest there and the glow puffed the core into a ball, 2:03)
+        col += lineCol * glowAmt * 2.0 * exp(-d * 0.018 * (1.0 - 0.7 * uGridFlash)) * (1.0 + 4.0 * uGridFlash) * mix(0.45, 1.0, smoothstep(3.0, 12.0, d));
         col += glow(0.7) * exp(-d * 0.3) * 0.02 * (0.3 + 0.7 * uLow + 0.4 * uHeart) * (1.0 - 0.6 * uVoid);   // a faint pool of light under the core, beating with its heart; dread dims it
         // Light that touches the floor. The core's glow pools beneath it; the floor is wet
         // black glass, so the core shines back from it, the reflection rippling with the
@@ -294,18 +416,35 @@ export function makeFloor(pal) {
         // (The core's pool and reflection on the floor were tried and taken out: even dim,
         // the glow effect spread them into a haze. The void stays black around the core.)
         col += glowOf(uCoreCol, 0.45) * uCoreLight * 0.07 * exp(-d * 0.16);   // deep and saturated, never washed out
-        vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
-        if (n.y < 0.0) n = -n;
-        vec3 v = normalize(vWorld - cameraPosition), r = reflect(v, n), toCore = normalize(-vWorld);
-        float spec = pow(max(dot(r, toCore), 0.0), 90.0);
-        col += coreC * spec * 0.0;
+        // The glass mirrors the sky: the horizon's glow, the nebula's gas and the ring of
+        // bars, bent by the waves (the surface's true slope), strongest at a glancing look.
+        vec3 n = normalize(vN);
+        vec3 r = reflect(v, n);
+        float fres = 0.04 + 0.96 * pow(1.0 - max(dot(-v, n), 0.0), 5.0);
+        // A wave tints the void where its surface slopes (its rings), never by height: at a drop the whole disc inside the
+        // bars stands tall and tinting by height flooded it into one pink plate (2026-11-05). In the mirror the rings are the light;
+        // on the grid the lines carry them, and any tint there filled the drop at 2:03 with magenta rings (2026-11-05).
+        float sl = 1.0 - n.y, crest = smoothstep(0.01, 0.12, sl) * (1.0 - smoothstep(0.12, 0.4, sl));
+        col += glowOf(uAccent, mix(0.8, 0.95, uMirror)) * crest * mix(0.0, 0.22 + 0.25 * uEnergy, uMirror) * exp(-d * mix(0.028, 0.03, uMirror)) * smoothstep(4.0, 12.0, d);
+        vec3 refl = glow(0.6) * pow(max(0.0, 1.0 - abs(r.y)), 10.0) * 0.12 + uRamp[1] * 0.12 * smoothstep(0.0, 0.6, r.y);
+        if (uNebOn > 0.5 && fres > 0.09) {   // (the gas is under 3% of the picture at a steeper look: not worth its four lookups)
+          float ra = uTime * 0.004, cr = cos(ra), sr = sin(ra);
+          vec3 rd = vec3(cr * r.x - sr * r.z, r.y, sr * r.x + cr * r.z);
+          float gas = smoothstep(0.26, 0.7, nebAt(vec2(atan(rd.z, rd.x) / 6.28318 + 0.5, asin(clamp(rd.y, -1.0, 1.0)) / 3.14159 + 0.5)));
+          refl += mix(glow(0.32), glowOf(uAccent, 0.85), gas * gas) * gas * 0.35;
+        }
+        refl += glowOf(uWallCol, 0.8) * smoothstep(0.0, 0.04, r.y) * smoothstep(0.22, 0.06, r.y) * smoothstep(30.0, 6.0, d) * (0.08 + 0.25 * uEnergy);   // the bars' light, upside down in the glass
+        col += refl * fres * smoothstep(110.0, 40.0, d);
         col += glowOf(uWallCol, 0.8) * exp(-(d - 25.0) * (d - 25.0) * 0.15) * (0.015 + 0.06 * uEnergy);
         // From beneath the ceiling is glass: the singularity shows through it, the lines carry the light.
         float a = smoothstep(150.0, 70.0, d);
         // Rain on the void: each drop lands as a point of light and a thin ring that
-        // spreads through the grid and fades.
-        if (d > 24.0) for (int k = 0; k < 40; k++) {   // (rain only falls beyond the bars: inside the ring no pixel pays for it)
-          vec4 dr = uDrops[k];
+        // spreads through the grid and fades. Drops land 27 to 57 units out and touch 2.4
+        // around them, so no pixel elsewhere pays for rain, and the rest pay only for the
+        // drops still ringing (a dry floor pays nothing).
+        if (uDropN > 0 && d > 24.0 && d < 60.0) for (int k = 0; k < 40; k++) {
+          if (k >= uDropN) break;
+          vec4 dr = uDropLive[k];
           float age = uTime - dr.z;
           if (age < 0.0 || age > 1.3) continue;
           float dd = length(vWorld.xz - dr.xy);
@@ -323,9 +462,41 @@ export function makeFloor(pal) {
         gl_FragColor = vec4(col, a);
       }`,
   });
+  // The floor never writes depth, so its own squares must be drawn far to near: drawn in the plane's fixed order, a far
+  // strip painted over a near wave's crest from two of the camera's four sides (long black slits cut out of a wave, most
+  // of all under the core, where the waves stand tallest: "a rip"). The inner block, where a wave has any height, is put
+  // in order around the camera's own square (rows toward it, and the squares of each row toward it) whenever the camera
+  // crosses into a new square; the far floor keeps its fixed order and is drawn before it.
+  const SEG = 300, IN = 64, LO = SEG / 2 - IN, HI = SEG / 2 + IN, W = SEG + 1;
+  const index = new Uint32Array(SEG * SEG * 6);
+  let n = 0;
+  const quad = (ix, iy) => {
+    const a = ix + W * iy, b = ix + W * (iy + 1), c = ix + 1 + W * (iy + 1), d = ix + 1 + W * iy;
+    index[n++] = a; index[n++] = b; index[n++] = d; index[n++] = b; index[n++] = c; index[n++] = d;
+  };
+  for (let iy = 0; iy < SEG; iy++) for (let ix = 0; ix < SEG; ix++) if (ix < LO || ix >= HI || iy < LO || iy >= HI) quad(ix, iy);
+  const innerAt = n, towards = (k, c) => (k < c - LO ? LO + k : HI - 1 - (k - (c - LO)));   // (the k-th of a line of squares, farthest first, ending on the camera's own)
+  const order = (cc, cr) => {
+    n = innerAt;
+    for (let k = 0; k < 2 * IN; k++) { const iy = towards(k, cr); for (let j = 0; j < 2 * IN; j++) quad(towards(j, cc), iy); }
+  };
+  order(SEG / 2, SEG / 2);
+  const indexAttr = new THREE.BufferAttribute(index, 1);
+  indexAttr.setUsage(THREE.DynamicDrawUsage);
+  geo.setIndex(indexAttr);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.y = -4.2;
   mesh.renderOrder = -1;   // drawn first: everything else lies over it
+  let square = -1;
+  mesh.onBeforeRender = (renderer, scene, camera) => {
+    const at = (v) => Math.min(HI - 1, Math.max(LO, Math.floor(v + SEG / 2)));
+    const cc = at(camera.position.x - mesh.position.x), cr = at(camera.position.z - mesh.position.z);
+    if (cc * SEG + cr === square) return;
+    square = cc * SEG + cr;
+    order(cc, cr);
+    indexAttr.clearUpdateRanges(); indexAttr.addUpdateRange(innerAt, index.length - innerAt);
+    indexAttr.needsUpdate = true;
+  };
   let fxLeft = 2; const fxReady = () => { if (--fxLeft === 0) uniforms.uFxOn.value = 1; };
   fxTexture('caustics.png', (t) => { uniforms.uCaus.value = t; fxReady(); }, { mirror: true });
   fxTexture('ripple.png', (t) => { uniforms.uRip.value = t; fxReady(); }, { atlas: true });
@@ -340,7 +511,7 @@ export function makeFloor(pal) {
       for (let k = 0; k < RIPPLES; k++) {
         const age = time - T[k];
         if (age >= 0 && age < 0.05) { A[k] = Math.min(4, A[k] + amp * 0.5); return; }
-        const left = age > 7 ? 0 : A[k] * Math.exp(-0.6 * age);
+        const left = age > RIPPLE_LIFE ? 0 : A[k] * Math.exp(-0.12 * age - Math.max(0, age * 14 - 25) * 0.07);
         if (left < bestLeft) { bestLeft = left; best = k; }
       }
       T[best] = time; A[best] = amp;
@@ -350,8 +521,8 @@ export function makeFloor(pal) {
 }
 
 // ── Strings: the grid as lines of light stretched over the floor. They ride the
-// floor's shockwave rings and a slow swell, all together, so the grid moves like
-// one calm sheet; a pluck (the backbeat) sweeps a band of light out across it.
+// floor's shockwave rings, all together, so the grid moves like one still sheet the
+// core disturbs; a pluck (the backbeat) sweeps a band of light out across it.
 export function makeStrings(pal, floorUniforms) {
   const N = 70, SPAN = 140, SEG = 160, pos = [], info = [];   // the whole floor: no wave ever rolls out past the grid
   for (let axis = 0; axis < 2; axis++) for (let i = 0; i < N; i++) {
@@ -368,27 +539,21 @@ export function makeStrings(pal, floorUniforms) {
   const PL = 8;   // light bands sweeping at once
   const uniforms = { uTime: { value: 0 }, uPluck: floorUniforms.uPluck, uPluckT: floorUniforms.uPluckT, uEnergy: { value: 0 }, uLow: { value: 0 },   // (its bands light the floor's grid)
     uPluckCol: floorUniforms.uPluckCol, uPluckK: floorUniforms.uPluckK,   // the backbeat's light carries the part's second feeling
-    uRipT: floorUniforms.uRipT, uRipA: floorUniforms.uRipA, ...pal };
+    uRipT: floorUniforms.uRipT, uRipA: floorUniforms.uRipA, uWob: floorUniforms.uWob, uBend: floorUniforms.uBend, ...pal };
   const mat = new THREE.ShaderMaterial({
     uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
     vertexShader: /* glsl */ `
-      uniform float uTime, uPluck[${PL}], uPluckT[${PL}], uLow, uRipT[${RIPPLES}], uRipA[${RIPPLES}];
+      uniform float uTime, uPluck[${PL}], uPluckT[${PL}], uLow, uRipT[${RIPPLES}], uRipA[${RIPPLES}], uWob, uBend;
       attribute vec3 info;
       varying float vD, vH, vCoarse, vU, vB;
+      ${WAVES_GLSL}
       void main(){
         vec3 p = position;
-        float d = length(p.xz), h = 0.0;
-        for (int i = 0; i < ${RIPPLES}; i++){
-          float age = uTime - uRipT[i];
-          if (age < 0.0 || age > 7.0) continue;
-          float front = age * 14.0;
-          h += uRipA[i] * exp(-age * 0.6) * exp(-(d - front) * (d - front) * 0.18) * smoothstep(0.0, 4.0, d);
-        }
-        // The grid moves as one: it rides the floor's waves and one slow swell that
-        // rolls across the whole field (never a string wobbling on its own: neighbours
+        float d = length(p.xz), h = waves(d).x;
+        // The grid moves as one: it rides the floor's waves and nothing else
+        // (never a string wobbling on its own: neighbours
         // out of step read as twitching). A pluck is light, not motion: a band of
         // brightness sweeping out from the centre across the strings.
-        float swell = sin(p.x * 0.11 + uTime * 0.45) * sin(p.z * 0.09 - uTime * 0.35) * 0.1 * (0.5 + uLow);
         float glowBand = 0.0;
         for (int k = 0; k < ${PL}; k++) {
           float age = uTime - uPluckT[k];
@@ -396,9 +561,10 @@ export function makeStrings(pal, floorUniforms) {
           float front = age * 22.0;
           glowBand += uPluck[k] * exp(-age * 0.7) * exp(-(d - front) * (d - front) * 0.04);
         }
-        h = 2.0 * tanh(h / 2.0);   // (the floor's own ceiling and camera calm: the strings ride exactly its waves)
-        h *= smoothstep(2.5, 9.0, length((modelMatrix * vec4(position, 1.0)).xyz - cameraPosition));
-        p.y += h + swell * smoothstep(0.0, 6.0, d);
+        h += uWob * 1.1 * exp(-(d - 10.0) * (d - 10.0) * 0.025);   // (the floor's womp pump)
+        h += uBend * 1.6 * exp(-d * d * 0.005) * smoothstep(2.0, 7.0, d);   // (and its whammy)
+        h = rideH(h, d, (modelMatrix * vec4(position, 1.0)).xyz);   // (exactly the floor's surface: the strings ride its waves)
+        p.y += h;   // (the liquid is still: only the core's waves move it)
         vD = d; vH = h + glowBand * 0.5; vCoarse = info.z; vU = info.x; vB = glowBand;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
       }`,
@@ -530,8 +696,9 @@ export function makeRing(sampleRate = 48000) {
           const ka = T - S.kickT, kb = ka >= 0 ? Math.exp(-ka * 9) : 0;
           if (kb > 0.01) color.multiplyScalar(1 + 0.7 * kb);
           // Wubs: the whole ring strobes between two colours, one per wub.
+          // (a brightness pulse, never a colour flip: visuals.js lets at most 3 a second through, the flash-comfort line)
           const wb = S.heavy * Math.exp(-(T - S.wubT) * 10);
-          if (wb > 0.01) mixIn(S.wubN & 1 ? S.dual : accent, wb);
+          if (wb > 0.01) color.multiplyScalar(1 + 0.6 * wb);
           // A scream: the core is the main character, so the wall only answers it, in the
           // core's own two colours (its rim and its body). One calm pattern holds for eight
           // bars of music before easing into the next; the beat is a soft brightness pulse.
@@ -565,6 +732,9 @@ export function makeRing(sampleRate = 48000) {
           if (S.waking < 1) color.multiplyScalar(Math.max(0, Math.min(1, (S.waking * 1.2 - d / Math.PI) * 6 + 1)));
           if (S.ending > 0) color.multiplyScalar(Math.max(0, Math.min(1, (d / Math.PI - S.ending) * 6 + 1)));
         }
+        // away from the bar's own grey, so white and grey (the drop's flash) stay as they are.
+        const lum = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
+        color.setRGB(Math.max(0, lum + (color.r - lum) * 1.5), Math.max(0, lum + (color.g - lum) * 1.5), Math.max(0, lum + (color.b - lum) * 1.5));
         // Never brighter than full in any channel: an over-bright red tone-maps to orange.
         const mx = Math.max(color.r, color.g, color.b);
         if (mx > 1) color.multiplyScalar(1 / mx);

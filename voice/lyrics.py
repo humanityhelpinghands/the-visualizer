@@ -15,6 +15,21 @@ Runs as a gentle background worker inside the server (3 threads, one song at a
 time, whatever's playing first), or by hand:  python voice/lyrics.py "music/Song.mp3"
 """
 import json
+
+# PyAV 19 dropped av.open's metadata_errors option, which faster-whisper 1.2.1 still passes
+# (every new song's lyrics failed with a TypeError). Drop it when PyAV won't take it.
+try:
+    import av as _av
+    _av_open = _av.open
+    def _open(*a, **k):
+        try:
+            return _av_open(*a, **k)
+        except TypeError:
+            k.pop("metadata_errors", None)
+            return _av_open(*a, **k)
+    _av.open = _open
+except ImportError:
+    pass
 import os
 import re
 import sys
@@ -32,7 +47,7 @@ CACHE = os.path.join(ROOT, "cache", "lyrics")
 AUDIO_EXT = {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".opus", ".webm"}
 MODEL = "small.en"
 ALIGN_VERSION = 4          # bump when align.py improves: every song re-aligns from its .heard.json at startup
-LISTEN_VERSION = 2         # 2: missed stretches re-heard with the lines that belong there
+LISTEN_VERSION = 3         # 2: missed stretches re-heard with the lines that belong there; 3: a fresh (unprimed) listen too (b69)
 LISTENED = "whisper %s, primed with your lyrics" % MODEL
 # Whisper's favourite inventions over instrumentals.
 JUNK = {"thank you.", "thanks for watching!", "thank you for watching.", "you", "♪", "music", "[music]", "(music)"}
@@ -131,6 +146,15 @@ class Transcriber:
                 merged, score = trial, got
         return merged
 
+    def best_listen(self, audio, written, heard):
+        """A listen primed with your lines can get stuck on one word (b69: "bye" smeared over 0:12 to 0:24 of Heat Death ·
+        Sparkle, so its chorus showed 6 s late), while the same song heard fresh lands every line. Hear it fresh too, and keep
+        whichever lands more of your lines (ties keep the primed one)."""
+        def landed(ws):
+            return sum(1 for l in align.align(written, ws, junk=JUNK) if l["src"] == "heard")
+        fresh = self.fill_holes(audio, written, self.words(audio))
+        return fresh if landed(fresh) > landed(heard) else heard
+
     def lrc(self, path):
         """Plain transcription, for songs with no lyrics in the file."""
         segs, _ = self.model.transcribe(
@@ -169,10 +193,28 @@ def heard_path(stem):
     return os.path.join(CACHE, stem + ".heard.json")
 
 
-def lrc_info(stem):
-    """What a cached .lrc is: {"version": n, "kind": "yours"|"heard", "full": bool} or None."""
+_STAT_CACHE = {}
+
+
+def _by_stat(path, read):
+    """read(path), remembered until the file changes (the lyrics poll asks about every song each time)."""
     try:
-        with open(cache_path(stem), encoding="utf-8") as f:
+        st = os.stat(path)
+    except OSError:
+        _STAT_CACHE.pop(path, None)
+        return read(path)
+    key = (st.st_mtime_ns, st.st_size)
+    hit = _STAT_CACHE.get(path)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    value = read(path)
+    _STAT_CACHE[path] = (key, value)
+    return value
+
+
+def _read_lrc_info(path):
+    try:
+        with open(path, encoding="utf-8") as f:
             head = f.read(400)
     except OSError:
         return None
@@ -180,6 +222,12 @@ def lrc_info(stem):
     if not m:
         return {"version": 1, "kind": "heard", "full": True}
     return {"version": int(m.group(1)), "kind": m.group(2), "full": m.group(3) != "quick"}
+
+
+def lrc_info(stem):
+    """What a cached .lrc is: {"version": n, "kind": "yours"|"heard", "full": bool} or None."""
+    info = _by_stat(cache_path(stem), _read_lrc_info)
+    return dict(info) if info else None
 
 
 def words_from_lrc(path):
@@ -210,6 +258,20 @@ def load_heard(stem):
             return json.load(f)
     except (OSError, ValueError):
         return None
+
+
+def _read_listen(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            h = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return h.get("listen", 1) if h else None
+
+
+def heard_listen(stem):
+    """Which listen a song's .heard.json came from (None: no usable file), without keeping its words."""
+    return _by_stat(heard_path(stem), _read_listen)
 
 
 def yours_lrc(title, written, heard, source, full):
@@ -265,8 +327,8 @@ class Worker:
         if info and info["full"] and info["version"] >= ALIGN_VERSION:
             if info["kind"] != "yours":
                 return "done"
-            h = load_heard(stem)
-            if h and h.get("listen", 1) >= LISTEN_VERSION:
+            listen = heard_listen(stem)
+            if listen is not None and listen >= LISTEN_VERSION:
                 return "done"
         if info and info["kind"] == "heard" and info["version"] < ALIGN_VERSION and not self.written_of(stem):
             return "done"                     # plain transcription of a song with no written lyrics: nothing to improve
@@ -340,8 +402,10 @@ class Worker:
             h = load_heard(stem)
             if not h or not h.get("full"):
                 h = {"source": LISTENED, "full": True, "listen": 1, "words": self.t.words(audio, prompt=opening(written))}
-            if h.get("listen", 1) < LISTEN_VERSION:
+            if h.get("listen", 1) < 2:
                 h["words"] = self.t.fill_holes(audio, written, h["words"])
+            if h.get("listen", 1) < LISTEN_VERSION:
+                h["words"] = self.t.best_listen(audio, written, h["words"])
                 h["listen"] = LISTEN_VERSION
             write_atomic(heard_path(stem), json.dumps(h))
             heard = h["words"]

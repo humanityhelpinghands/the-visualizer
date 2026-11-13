@@ -28,7 +28,7 @@ export function speak(text, { voice = 'af_heart', speed = 0.95, volume = 0.9 } =
       });
     } catch {
       if (!('speechSynthesis' in window)) return;
-      await new Promise((done) => { const u = new SpeechSynthesisUtterance(text); u.onend = u.onerror = done; speechSynthesis.speak(u); });
+      await new Promise((done) => { const u = new SpeechSynthesisUtterance(text); u.onend = u.onerror = done; speechSynthesis.speak(u); setTimeout(done, 4000 + text.length * 120); });   // (Chrome sometimes never ends it: the queue must not stall)
     }
   };
   queue = queue.then(line, line);

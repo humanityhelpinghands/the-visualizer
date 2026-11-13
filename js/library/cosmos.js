@@ -191,7 +191,7 @@ void main() {
   col += vec3(1.0, 0.6, 0.2) * city * 1.4;
   vec3 H = normalize(uSun + V);
   col += vec3(1.0, 0.85, 0.7) * pow(max(dot(N, H), 0.0), 60.0) * (1.0 - land) * day * 0.6;
-  col += vec3(0.25, 0.6, 1.0) * pow(1.0 - max(dot(N, V), 0.0), 3.0) * (0.1 + 0.9 * lit) * 0.8;
+  col += vec3(0.25, 0.6, 1.0) * pow(clamp(1.0 - dot(N, V), 0.0, 1.0), 3.0) * (0.1 + 0.9 * lit) * 0.8;
   gl_FragColor = vec4(col, uOpacity);
 }`;
 const ATMO_FRAG = `
@@ -199,7 +199,7 @@ uniform vec3 uSun; uniform float uOpacity;
 varying vec3 vObj; varying vec3 vN; varying vec3 vV;
 void main() {
   vec3 N = normalize(vN), V = normalize(vV);
-  float f = pow(1.0 - abs(dot(N, V)), 2.5);
+  float f = pow(clamp(1.0 - abs(dot(N, V)), 0.0, 1.0), 2.5);   // (two unit vectors can dot to 1.0000001: pow() of that tiny negative is NaN on D3D)
   float lit = smoothstep(-0.35, 0.4, dot(N, uSun));
   gl_FragColor = vec4(vec3(0.22, 0.55, 1.0) * f * (0.1 + lit) * 1.5 * uOpacity, 1.0);
 }`;
@@ -218,7 +218,7 @@ uniform float uOpacity;
 varying vec3 vObj; varying vec3 vN; varying vec3 vV;
 void main() {
   vec3 n = normalize(vObj), N = normalize(vN), V = normalize(vV);
-  float f = pow(1.0 - abs(dot(N, V)), 2.0), k = 0.08 + 0.92 * f;
+  float f = pow(clamp(1.0 - abs(dot(N, V)), 0.0, 1.0), 2.0), k = 0.08 + 0.92 * f;
   float t = smoothstep(0.3, 0.75, fbm(n * 7.0 + 2.0));
   vec3 c = mix(vec3(0.08, 0.05, 0.35), vec3(0.55, 0.18, 0.95), smoothstep(0.0, 0.5, t));
   c = mix(c, vec3(1.0, 0.35, 0.6), smoothstep(0.5, 0.8, t));

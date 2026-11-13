@@ -6,6 +6,20 @@ import { makeCore } from './scene/cores.js';
 import { makePost } from './scene/post.js';
 import { Director } from './scene/director.js';
 import { PALETTES, AXES, VALENCE, STARS, TEMPER, BREATH, CAMERA, RINGS } from './emotion.js';
+import { pickScheme } from './scene/schemes.js';
+
+// The floor's look: 'auto' (the black mirror in quiet parts, the grid rising with the loud ones), or ?floor=grid / ?floor=mirror.
+const FLOOR_MODE = (() => { const m = /[?&]floor=(grid|mirror)\b/.exec(typeof location === 'undefined' ? '' : location.search); return m ? m[1] : 'auto'; })();
+// Per-frame tables, made once (built inside frame() they were fresh garbage sixty times a second).
+// The core's size is a feeling: awe, calm, rage and defiance loom large; loneliness, grief and fear shrink it.
+const CORE_SIZE = { anger: 1.15, defiance: 1.15, joy: 1.1, hope: 1.1, calm: 1.1, mystery: 1.05, love: 1.05, desire: 1.05, nostalgia: 0.95, fear: 0.85, sadness: 0.85, loneliness: 0.75 };
+const HUSHED = new Set(['sadness', 'loneliness', 'calm', 'nostalgia']);
+// Its duality: every feeling's second colour, chosen to answer the first (rage's red against an electric violet,
+// grief's blue against a far gold, ...). Never green.
+const DUALS = { anger: '#6a3dff', defiance: '#2a7bff', desire: '#5b3dff', love: '#8f5cff', sadness: '#ff4fa0', loneliness: '#ff4f9a',
+  fear: '#ff2050', joy: '#00d4ff', hope: '#ff5fa2', nostalgia: '#7fc8ff', calm: '#a06bff', mystery: '#ff3ca8',
+  powerpoint: '#3b5bff', kawaii: '#7fd8ff', neon: '#ff2a6d' };
+const ENTRY_BANDS = ['mid', 'high'];
 
 // Display-space colour for the grade (no linearisation).
 const srgb = (hex, v = new THREE.Vector3()) => {
@@ -21,7 +35,8 @@ const OPPOSITE = { anger: 'calm', calm: 'anger', sadness: 'joy', joy: 'sadness',
 const NEIGHBOUR = { anger: 'desire', desire: 'love', love: 'nostalgia', nostalgia: 'hope', hope: 'joy', joy: 'neon',
   sadness: 'loneliness', loneliness: 'mystery', mystery: 'calm', calm: 'sadness', fear: 'anger', defiance: 'powerpoint',
   powerpoint: 'kawaii', neon: 'powerpoint', kawaii: 'neon' };
-const THEMES = [null, OPPOSITE, NEIGHBOUR];
+// (the second look a song turns to is a guest scheme, scene/schemes.js: seen sooner than the mirrors)
+const THEMES = [null, 'scheme', OPPOSITE, NEIGHBOUR], THEME_NEBULA = [0, 0, 1, 2];
 
 // The core's designed colour pairs, [rim, body], on its black heart: clean, cool,
 // never orange or gold, never clashing. Every feeling (and look) wears one.
@@ -113,6 +128,7 @@ function mixVivid(col, toward, k) {
   }
   return col.setHSL((((_h.h + dh * k) % 1) + 1) % 1, _h.s + (_m.s - _h.s) * k, _h.l + (_m.l - _h.l) * k, THREE.SRGBColorSpace);
 }
+const _g = Array.from({ length: 7 }, () => new THREE.Color()), _w = new THREE.Color(), _white = new THREE.Color(1, 1, 1), _hs = {};
 const ramp5 = () => [0, 1, 2, 3, 4].map(() => new THREE.Color());
 // Turn one colour by `deg` degrees of hue and scale its saturation (display space).
 // The key never turns a colour toward green (the lime and olive the house never
@@ -132,7 +148,17 @@ function keyDir(h, s, sign) {
 // The drop's turn of the whole circle skips the green: it runs on a wheel with the
 // green cut out (gold carries straight on into cyan), so the wall's sweep never
 // passes through a colour the house never wears.
-const G0 = 0.012, GW = 0.458;   // (orange, gold and green all cut out: the wheel runs red, pink, violet, blue, cyan and back to red)
+// under white; there is no black one (a dark room needs no help).
+const WORD_SCHEMES = {
+  red: { wall: ['#ff1a3c', '#ff3d6e', '#ff8aa0'], floor: '#ff1a3c', accent: '#ffd0d8', core: ['#ffe0e6', '#e0102a'] },
+  blue: { wall: ['#1a4dff', '#3d8bff', '#a0c8ff'], floor: '#2a6bff', accent: '#cfe2ff' },
+  cyan: { wall: ['#00e5ff', '#00b4ff', '#b0f6ff'], floor: '#00e5ff', accent: '#e0fdff' },
+  green: { wall: ['#00ff41', '#16e05a', '#9dffb8'], floor: '#00ff41', accent: '#d0ffe0' },
+  purple: { wall: ['#8a3dff', '#b46bff', '#d8b8ff'], floor: '#8a3dff', accent: '#e6d6ff' },
+  pink: { wall: ['#ff4fd8', '#ff8ae6', '#ffc6f0'], floor: '#ff4fd8', accent: '#ffe0f6' },
+  white: { wall: ['#e8f0ff', '#c8dcff', '#ffffff'], floor: '#d8e6ff', accent: '#ffffff' },
+};
+const G0 = 0.012, GW = 0.188;   // (orange and gold cut out: the wheel runs red, pink, violet, blue, cyan, green and back to red)
 const toWheel = (h) => (h < G0 ? h : h < G0 + GW ? G0 : h - GW);
 const fromWheel = (u) => (u < G0 ? u : u + GW);
 function keyed(src, dst, deg, sat, swing = 0, turn = 0) {
@@ -143,11 +169,10 @@ function keyed(src, dst, deg, sat, swing = 0, turn = 0) {
   // ...and never into brown: a dark orange reads as mud. Dark tones in the orange
   // band slide to deep red (embers, blood); bright ones keep their glowing amber.
   if (h > 0.03 && h < 0.13 && _h.l < 0.42) h = 0.01 + (h - 0.03) * (_h.l / 0.42) * 0.4;   // darkest: pure deep red
-  // ...and never orange or gold (a style choice): every
   // orange, amber and gold folds into red.
   if (h > 0.012 && h < 0.2) h = 0.012 * (1 - (h - 0.012) / 0.188);
-  // ...and never green or teal: they fold into cyan (fear's mint is cyan here).
-  else if (h >= 0.2 && h < 0.5) h = 0.5 + 0.02 * (h - 0.2) / 0.3;
+  // dull green (swamp, olive) folds into cyan.
+  else if (h >= 0.2 && h < 0.5 && _h.l < 0.3) h = 0.5 + 0.02 * (h - 0.2) / 0.3;
   return dst.setHSL(((h % 1) + 1) % 1, Math.min(1, _h.s * sat), _h.l, THREE.SRGBColorSpace);
 }
 
@@ -169,8 +194,9 @@ export class World {
     if (!renderer.capabilities.isWebGL2) throw new Error('This browser has no WebGL2. The loft needs it.');
     // Supersampled: drawn at 1.5x the screen (and scaled down) so every line is fine
     // and steady, a "4K" look on a 1080p screen. ?q=low draws at the screen's own size.
-    const ss = /[?&]q=low/.test(location.search) ? 1 : 1.5;
-    this.pixelRatio = Math.min(2, Math.max(window.devicePixelRatio, 1) * ss);
+    const bg = /[?&]bg\b/.test(location.search);   // (background mode, js/bgmode.js: 1/16 of the screen, or ?bgscale=8)
+    const ss = bg ? 1 / (+(new URLSearchParams(location.search).get('bgscale')) || 32) : /[?&]q=low/.test(location.search) ? 1 : 1.5;
+    this.pixelRatio = bg ? ss : Math.min(2, Math.max(window.devicePixelRatio, 1) * ss);
     renderer.setPixelRatio(this.pixelRatio);
     // Neutral keeps hue and saturation through the highlights (ACES bleaches them toward white).
     renderer.toneMapping = THREE.NeutralToneMapping;
@@ -185,7 +211,7 @@ export class World {
     this.pal = palette();                 // the feeling's own colours (the lyrics, the drawer and the wall's peaks wear them)
     // Every other layer has its own hue in the feeling's harmony (emotion.js layers).
     this.palSky = palette(); this.palFloor = palette(); this.palCore = palette();
-    this.wallRamps = [ramp5(), ramp5(), ramp5()];
+    this.wallRamps = [ramp5(), ramp5(), ramp5()]; this.ringAcc = new THREE.Color();
     // The mood's colours as they glide (unkeyed); the colour key turns them every frame.
     this.base = { ramp: ramp5(), accent: new THREE.Color(), sky: ramp5(), floor: ramp5(), core: ramp5(), wall: [ramp5(), ramp5(), ramp5()] };
     // The colour key: how far the song has carried the colours from the mood's home
@@ -205,6 +231,7 @@ export class World {
     this.moodKey = '';
     this.sky = makeSky(this.palSky);
     this.floor = makeFloor(this.palFloor);
+    for (const k of ['uNeb', 'uNebOn', 'uNeb2', 'uNebMix', 'uNebBase']) this.floor.uniforms[k] = this.sky.uniforms[k];   // one nebula: the glass mirrors the sky's
     this.rain = makeRain(this.floor.mesh.position.y);
     this.strings = makeStrings(this.palFloor, this.floor.uniforms);
     this.strings.mesh.position.y = this.floor.mesh.position.y + 0.35;   // strung just above the ground
@@ -248,6 +275,7 @@ export class World {
     this.voice = 0;   // loudness of the announcer, 0..1 (main.js feeds it)
     this.lyricOn = false;   // a lyric line is on screen (main.js feeds it)
     this.wallDim = 1;
+    this.chillDone = new Set();
     this._db = new THREE.Vector2();
     this._silence = new Uint8Array(1024);
     this.setMood('mystery', 'mystery', null, 0, true);
@@ -291,6 +319,7 @@ export class World {
       else { for (const key of Object.keys(this[k])) delete this[k][key]; Object.assign(this[k], v); }
     }
     this.time = t; this.part = null;
+    this.sky.nebula(0, true);
     this.core.shell.rotation.set(0, 0, 0);
     this.halo.clear(); this.floor.clear(); this.strings.clear();
   }
@@ -305,7 +334,11 @@ export class World {
     this.dissolveGoal = 0; this.dissolve = 0; this.resolve = 0; this.depth = 0;
     this.kickless = !map || map.kicks.length < map.beats.length * 0.25;
     this.barsSinceCut = 0;
-    this.theme = 0; this.turnAt = -99;
+    this.theme = 0; this.turnAt = -99; this.scheme = null; this.schemeAmt = 0; this.beatN = 0;
+    this.sky.nebula(0, true);   // every song opens on the locked nebula
+    // Rare things, rolled once per listen: one listen in twenty is lucky (shooting stars on its
+    // big moments); some songs end in the deep zoom-out.
+    this.lucky = this.R() < 0.05; this.cosmosEnd = this.R() < 0.3; this.chillT = -99; this.chillDone = new Set();
     // Every song its own look: a twist of hue on its feelings' colours, read from its
     // name (the same song always looks the same; two hope songs never look alike).
     let hh = 2166136261; for (const ch of String(name || '')) hh = Math.imul(hh ^ ch.charCodeAt(0), 16777619);
@@ -326,7 +359,7 @@ export class World {
     // designed palette of its own, so the mirror is never muddy and never green).
     this.moodArgs = [base, accent, bleed, bleedAmt, false, F];
     const map = THEMES[this.theme || 0];
-    if (map) {
+    if (map && typeof map === 'object') {
       const o = (e) => (e && map[e]) || e;
       base = o(base); accent = o(accent); bleed = o(bleed);
       if (F && F.v) F = { ...F, v: F.v.map(([e, w]) => [o(e), w]) };
@@ -412,6 +445,13 @@ export class World {
 
   // Where the song has carried the colours: `shift` degrees of hue around the
   // mood's harmony (section + harmony, from main.js) and a saturation lift.
+  // A lyric that sings a colour: the bars, grid and strings lean into it for `secs`, then ease back.
+  wordColor(name, secs = 3) {
+    const S = WORD_SCHEMES[name];
+    if (!S) return;
+    this.wordScheme = S; this.wordUntil = this.time + secs;
+  }
+
   colorKey(shift, sat = 1) { this.key.goalShift = shift; this.key.goalSat = sat; }
 
   // Write the keyed colours into every layer. `wallSwing`, `wallTurn`: the wall's own
@@ -427,6 +467,45 @@ export class World {
     };
     out(this.pal, b.ramp, 1); out(this.palSky, b.sky, 0.4); out(this.palFloor, b.floor, 0.6); out(this.palCore, b.core, 1, wallSwing, wallTurn + (this.coreTurn || 0) + 35 * Math.sin(this.time * 0.13));   // the core moves through colour with the music too
     this.wallRamps.forEach((r, j) => r.forEach((col, i) => keyed(b.wall[j][i], col, d, s, wallSwing, wallTurn)));
+    this._guest();
+    if ((this.wordAmt || 0) > 0.005 && this.wordScheme) this._guest(this.wordScheme, this.wordAmt, false);   // a sung colour, over everything for its line
+  }
+
+  // A guest scheme over the room (scene/schemes.js), faded by schemeAmt: the bars, the grid
+  // and the strings take its colours in their mid and bright tones (the darkest stay the
+  // mood's own: no muddy darks), and the core takes its pair if it brings one.
+  _guest(S = this.scheme, a = this.schemeAmt || 0, first = true) {
+    if (first) this.ringAcc.copy(this.pal.uAccent.value);
+    if (!S || a < 0.005) return;
+    const cols = S.wall.map((hex, j) => _g[j].set(hex));
+    if (S.anim === 'rgb') {   // the classic LED colour cycle, each band a third of the way round (orange and gold skipped)
+      for (let j = 0; j < 3; j++) { const u = ((this.time * (S.slow || 0.07) + j / 3) % 1) * (1 - GW); cols[j].setHSL(fromWheel(u), 1, 0.55, THREE.SRGBColorSpace); }
+    } else if (S.anim === 'holo') {   // a slow drift between cyan, lilac and pink (hue .5 to .92, never near yellow)
+      for (let j = 0; j < 3; j++) cols[j].setHSL(0.71 + 0.21 * Math.sin(this.time * 0.09 + j * 2.1), 0.95, 0.62, THREE.SRGBColorSpace);
+    } else if (S.anim === 'flip' && (this.beatN || 0) % 2) { _w.copy(cols[0]); cols[0].copy(cols[1]); cols[1].copy(_w); }   // trades on every beat
+    // The whole ramp in the scheme's own hue, deep to bright (blending its colours over the mood's
+    // red ran through yellow and orange): near black in its own hue, never a dull mid-dark.
+    const DEEP = [0.03, 0.1, 0.24];
+    const tone = (out, c, i, k) => {
+      c.getHSL(_hs, THREE.SRGBColorSpace);
+      if (i < 3) _w.setHSL(_hs.h, Math.max(_hs.s, 0.75), Math.min(_hs.l, DEEP[i]), THREE.SRGBColorSpace);
+      else { _w.copy(c); if (i === 4) _w.lerp(_white, 0.25); }   // (a touch of white at the top, not a pastel wash)
+      out.lerp(_w, k);
+    };
+    this.wallRamps.forEach((r, j) => r.forEach((col, i) => tone(col, cols[j], i, a)));
+    const fl = S.anim === 'rgb' || S.anim === 'holo' ? cols[0] : S.anim === 'flip' ? cols[(this.beatN || 0) % 2] : _g[3].set(S.floor);
+    const pf = this.palFloor, acc = S.anim === 'rgb' || S.anim === 'holo' ? cols[1] : _g[4].set(S.accent);
+    pf.uRamp.value.forEach((col, i) => tone(col, fl, i, a));
+    pf.uAccent.value.lerp(acc, a);
+    pf.uColA.value.copy(pf.uRamp.value[1]); pf.uColB.value.copy(pf.uRamp.value[3]); pf.uColC.value.copy(pf.uAccent.value);
+    this.ringAcc.lerp(acc, a);   // (the tallest bars' tips)
+    for (const u of new Set([this.strings.uniforms.uPluckCol, this.floor.uniforms.uPluckCol])) u.value.lerp(acc, a);   // (the backbeat's light: the mood's colour over a scheme's lines ran yellow)
+    if (S.core) {
+      const pc = this.palCore, rim = _g[5].set(S.core[0]), body = _g[6].set(S.core[1]), k = 0.8 * a;
+      pc.uRamp.value[2].lerp(body, k); pc.uRamp.value[3].lerp(_w.copy(body).lerp(rim, 0.5), k); pc.uRamp.value[4].lerp(rim, k);
+      pc.uAccent.value.lerp(rim, k);
+      pc.uColA.value.copy(pc.uRamp.value[1]); pc.uColB.value.copy(pc.uRamp.value[3]); pc.uColC.value.copy(pc.uAccent.value);
+    }
   }
 
   // The song's structure, as written in its lyrics, sets how the camera moves.
@@ -510,7 +589,6 @@ export class World {
     const su2 = this.strings.uniforms;
     if (f2) {
       _c.set(PALETTES[f2[0]].ramp[3]).getHSL(_h, THREE.SRGBColorSpace);
-      if (_h.h > 0.18 && _h.h < 0.45) _c.set(PALETTES[f2[0]].accent).getHSL(_h, THREE.SRGBColorSpace);   // never green: fear's mint becomes its red
       if (_h.h >= 0.45 && _h.h < 0.52) _h.h = 0.52;   // (and calm's teal its cyan)
       _c.setHSL(_h.h, Math.max(0.8, _h.s), Math.max(0.45, Math.min(0.6, _h.l)), THREE.SRGBColorSpace);
       if (su2.uPluckK.value < 0.01) su2.uPluckCol.value.copy(_c); else mixVivid(su2.uPluckCol.value, _c, k);
@@ -562,6 +640,20 @@ export class World {
     return best;
   }
 
+  // A shooting star across the sky (rare, or a lucky listen's big moments).
+  shoot(T) {
+    if (T - (this.shootT ?? -99) < 4) return;
+    this.shootT = T;
+    const U = this.sky.uniforms, a = Math.atan2(-this.camera.position.z, -this.camera.position.x) + (this.R() - 0.5) * 1.2,   // (in front of the camera)
+      e = 0.12 + this.R() * 0.14, turn = (this.R() < 0.5 ? -1 : 1) * (0.5 + this.R() * 0.4);   // (just over the bars: a level shot sees about 17 degrees up)
+    U.uShootA.value.set(Math.cos(a) * Math.cos(e), Math.sin(e), Math.sin(a) * Math.cos(e));
+    U.uShootB.value.set(Math.cos(a + turn) * Math.cos(e - 0.07), Math.sin(e - 0.07), Math.sin(a + turn) * Math.cos(e - 0.07));
+    U.uShootT.value = T;
+  }
+  chill() { this.chillT = this.time; this.swell = 1; this.halo.pulse(this.time, 0.7, this._ring(this.moodBase)); this.floor.ripple(this.time, 1.0); }
+  // Stopping for the night (a pause): the core slowly goes out and the camera rises into the stars.
+  goodbye(on) { this.byeT = on ? this.time : null; if (on) this.director.cut('cosmos', 4); else this._cut(2); }
+
   // A screamed line bursts a ring out of the core (at most one a second). Every
   // screamed word stabs the core's spikes out; the room itself (floor, strings, camera) keeps to the beat, its kicks and
   // backbeats hitting harder while the scream lasts (frame), so nothing lands
@@ -609,16 +701,21 @@ export class World {
 
   // The song's colour themes: its own, then each feeling's opposite, then each one's
   // neighbour, and round again. A song's biggest moments move it on (at most every 25 s):
-  // the same music, felt again in another light.
+  // the same music, felt again in another light, under another sky (each theme its own
+  // nebula, fading in: the locked one, then the river round the horizon, then the pillars).
   _nextTheme(T, f) {
     if (!f.playing || T - (this.turnAt ?? -99) <= 25) return;
     this.turnAt = T;
     this.theme = ((this.theme || 0) + 1) % THEMES.length;
+    if (THEMES[this.theme] === 'scheme') this.scheme = pickScheme(this.moodBase, this.R);   // a fresh guest each time round
+    this.sky.nebula(THEME_NEBULA[this.theme]);
     const m = this.moodArgs; if (m) { this.moodKey = null; this.setMood(m[0], m[1], m[2], m[3], false, m[5]); }
   }
 
   // Cut (or glide, blend > 0) to a shot the song's part and its feelings like.
   _cut(blend = 0) {
+    if ((this.majestic || 0) > 0.4 || this.time - (this.majT ?? -99) < 8) return;   // a majestic moment holds its one long shot
+    if ((this.ending || 0) > 0.25) return;   // the ending (or a goodbye) holds its shot to the last
     // Quiet intros and outros: the camera pulls far back and circles slowly.
     if (this.quiet) { this.director.cut('vast', Math.max(blend, 3)); this.barsSinceCut = 0; return; }
     const views = PART_VIEWS[this.part] || LEVEL_VIEWS[this.lv || 0];
@@ -650,7 +747,8 @@ export class World {
     // The ending: over the last seconds the plasma sinks into its black void, the room
     // darkens, and one last soft ring rolls out.
     const toEnd = f.toEnd ?? Infinity;
-    const endGoal = f.playing ? Math.min(1, Math.max(0, (5 - toEnd) / 4.7)) : 0;
+    const bye = this.byeT != null && !f.playing ? Math.min(1, (T - this.byeT) / 6) : 0;
+    const endGoal = Math.max(f.playing ? Math.min(1, Math.max(0, (5 - toEnd) / 4.7)) : 0, bye);
     this.ending = this.ending || 0;
     this.ending = endGoal >= this.ending ? endGoal : this.ending + (endGoal - this.ending) * Math.min(1, dt * 1.5);   // never snaps back to full light when the song stops
     if (f.playing && toEnd < 1.1 && toEnd > 0 && !this.endRing) { this.endRing = true; this.halo.pulse(T, 0.9, this._ring(this.moodBase)); this.floor.ripple(T, 1.0); }
@@ -671,6 +769,7 @@ export class World {
       if (this.show) this.show.dropT = T;
       this.explodeUntil = T + f.beatLen * (big ? 1.5 : 1.1);
       this.spread = 1;
+      if (big && T - (this.majT ?? -99) > 30 && !f.jumped) { this.majT = T; this.director.cut('top', 0.8); }   // the explosion, in slow motion from above
       if (big) this.halo.pulse(T + 0.12, 1.4, this._ring(this._charged()));
       this._cut();
       // A big drop (at most one every 25 s) changes the song's colour theme: every
@@ -692,7 +791,8 @@ export class World {
     if (f.playing && !this.woke) { this.woke = true; this.wakeT = T; this.floor.ripple(T, 1.6); this.halo.pulse(T, 0.8, this._ring(this.moodBase)); }
     this.waking = this.woke ? Math.min(1, (T - this.wakeT) / 2.2) : 0;
     // Winding down: through a song's last seconds the camera drifts out wide, into the vast shot.
-    if ((this.ending || 0) > 0.25 && this.director.shot !== 'vast' && !this.windCut) { this.windCut = true; this.director.cut('vast', 4); }
+    const endShot = this.cosmosEnd ? 'cosmos' : 'vast';
+    if ((this.ending || 0) > 0.25 && f.playing && this.director.shot !== endShot && !this.windCut) { this.windCut = true; this.director.cut(endShot, 4); }
     if ((this.ending || 0) < 0.05) this.windCut = false;
     // A peak with no drop (a loud, full-level stretch of 8 bars or more: the song's joy)
     // earns a new theme too, the moment it begins.
@@ -708,7 +808,7 @@ export class World {
       else if (sc && !f.jumped && this._sec && f.playing) {
         const lift = sc.level > this._sec.level, turn = sc.mode && this._sec.mode && sc.mode !== this._sec.mode;
         if (this.show) { this.show.chaseT = T; this.show.chaseDual = !!turn; }
-        if (this.starved && (lift || turn)) this._nextTheme(T, f);
+        if (lift || (this.starved && turn)) this._nextTheme(T, f);
         if (lift) this.floor.ripple(T, 0.9);
       }
       this._sec = sc;
@@ -728,6 +828,31 @@ export class World {
     this.songT = f.t;
     if (f.jumped) this.scream = this.screamGoal;   // a seek lands where it lands, no easing out of the old place
     this.scream += (this.screamGoal - this.scream) * Math.min(1, dt * (this.screamGoal > this.scream ? 5 : 1.2));
+    // The majestic moment: a scream, above all over heavy wobble bass. The camera stops cutting and
+    // drifts in slow motion while the core, the waves and the bars keep the music's full speed, so
+    // and floats there in slow motion for 8 seconds, then the cutting goes on: never a long stare at one
+    // angle, and at most one such moment every 30 s.
+    const majCond = (this.scream > 0.5 || f.reign >= 0) && (this.heavy || 0) > 0.3;
+    if (majCond && !this.majWas && T - (this.majT ?? -99) > 30 && !f.jumped) { this.majT = T; this.director.cut('top', 1.2); }
+    this.majWas = majCond;
+    const majGoal = majCond && T - (this.majT ?? -99) < 8 ? 1 : 0;
+    this.majestic = (this.majestic || 0) + (majGoal - (this.majestic || 0)) * Math.min(1, dt * (majGoal > (this.majestic || 0) ? 2 : 0.5));
+    // The blast in slow motion, like a film: from the moment a big drop explodes the waves it sends
+    // across the liquid void (the floor's rings, the strings' bands, the core's halo rings) roll out
+    // at a fifth of their speed, then ease back to real time so gently it goes unnoticed. (Their
+    // birth times slide forward, so they age slower; the music, the core and the rain keep time.)
+    const ms = T - (this.majT ?? -99);
+    const ca = T - (this.chillT ?? -99), chillRate = ca >= 0 && ca < 2.5 ? 0.5 + 0.5 * Math.pow(ca / 2.5, 2) : 1;   // a chills moment: a breath of slow motion
+    const rate = Math.min(chillRate, ms < 0 || ms > 8 ? 1 : ms < 2.2 ? 0.2 : 0.2 + 0.8 * (((x) => x * x * (3 - 2 * x))(Math.min(1, (ms - 2.2) / 5.3))));
+    // Rare shooting stars: now and then on their own; on a lucky listen, on every big moment.
+    if (f.playing && (this.R() < dt / 420 || (this.lucky && (f.dropHit || (this.scream > 0.6 && f.kickHit))))) this.shoot(T);
+    // The wait before a big drop: over its last four bars the room slowly holds its breath.
+    const bars4 = 4 * (f.barLen || 2);
+    this.antic = f.playing && nd && nd.big && f.toDrop < bars4 && f.toDrop > f.beatLen ? 1 - f.toDrop / bars4 : 0;
+    const lag = dt * (1 - rate);
+    if (lag > 0) {
+      for (const a of [this.floor.uniforms.uRipT.value, this.floor.uniforms.uPluckT.value, this.halo.uniforms.uWaveT.value]) for (let i = 0; i < a.length; i++) a[i] += lag;
+    }
     // A big drop's loud stretch letting go: the room exhales, a ring rolls out.
     const reigning = f.reign >= 0;
     if (this.reigning && !reigning && !f.jumped) {
@@ -750,7 +875,9 @@ export class World {
         every = [2, 4, 8, 16].reduce((a, b) => (Math.abs(b - base * mul) < Math.abs(a - base * mul) ? b : a));
       }
       const phraseBar = f.section ? f.barIdx - (f.section.bar0 || 0) : f.barIdx;
-      if (this.barsSinceCut >= Math.min(2, every) && phraseBar > 0 && phraseBar % every === 0) {
+      // 20 s in Changing Its Name and Untitled, 2026-11-05). It leaves on the next bar past 8 s (a majestic hold still wins, _cut).
+      const aerialDone = this.director.shot === 'top' && this.director.age > 8;
+      if (aerialDone || (this.barsSinceCut >= Math.min(2, every) && phraseBar > 0 && phraseBar % every === 0)) {
         this._cut(lv <= 1 && this.feature < 0.5 ? glide : 0);
         if (lv >= 2) this.glitch = Math.max(this.glitch, 0.25 * lvN);
       }
@@ -764,7 +891,7 @@ export class World {
     if (f.beatHit && f.playing && this.show) { this.show.beatT = T; this.show.beatN = (this.show.beatN || 0) + 1; if (f.beatInBar === 0) this.show.barN = (this.show.barN || 0) + 1; }
     if (kickHit && f.playing) {
       const k = (0.55 + 0.45 * Math.min(1, f.low)) * (1 + 0.3 * this.scream);   // a scream hits harder, on the beat
-      this.floor.ripple(T, (0.4 + 0.8 * lvN) * k);
+      if ((this.heavy || 0) < 0.5) this.floor.ripple(T, (0.4 + 0.8 * lvN) * k);   // (in heavy bass the womps own the floor: one wave per womp, no kick rings muddying them)
       this.director.kick((0.12 + 0.4 * lvN) * k * (1 + 0.4 * this.depth));   // each chorus's return hits harder
     }
     // Each instrument has its own place in the room: the kick rolls the floor, the
@@ -781,26 +908,47 @@ export class World {
     // Heavy bass (a dubstep or EDM drop's body): loud section, bass in charge. Every
     // wub (a sharp rise in the low end) hits the room: the strings and floor jump,
     // the camera jolts, and the beat strobes like a festival.
-    const heavyGoal = f.playing && lv >= 2 && f.energy >= 0.6 && bld < 0.3 ? 1 : 0;
+    // ...as much as the song's bass really wobbles (main.js bassHold): a moody song with a kick
+    // gets a third of the womp, never the full dubstep treatment.
+    const wobbly = 0.35 + 0.65 * smooth(0.44, 0.58, this.bassHold ?? 0.6);
+    const heavyGoal = f.playing && lv >= 2 && f.energy >= 0.6 && bld < 0.3 ? wobbly : 0;
     this.heavy = (this.heavy || 0) + (heavyGoal - (this.heavy || 0)) * Math.min(1, dt * (heavyGoal ? 3 : 0.8));
     // A wub: the bass dips and comes back up by a clear margin (a wobble cycle).
     const hv = this.heavy;
     // (the lowest point since the last wub; forgotten after a quiet half-second)
-    if (T - (this.wubT || 0) > 0.6) this.lowFloor = f.low;
+    // (it used to reset on every frame once 0.6 s had passed, so it never saw a dip again: womps went unseen)
+    if (T - (this.lowFloorT || 0) > 0.6) { this.lowFloor = f.low; this.lowFloorT = T; }
     this.lowFloor = Math.min(f.low, this.lowFloor ?? f.low);
     const rise = f.low - this.lowFloor;
     // (The floor, the strings and the camera take a wub at most every 0.35 s, and never tear the picture: at up to
     // 11 a second they cut each other off and the grid twitched.)
     if (hv > 0.3 && rise > 0.1 && T - (this.wubT || 0) > 0.09) {
-      this.wubT = T; this.lowFloor = f.low;
-      if (this.show) { this.show.wubT = T; this.show.wubN++; }
+      this.wubT = T; this.lowFloor = f.low; this.lowFloorT = T;
+      if (this.show && T - this.show.wubT > 0.34) { this.show.wubT = T; this.show.wubN++; }   // (the ring pulses at most 3 times a second)
       const w = hv * Math.min(1.5, rise * 3.5);
-      if (T - (this.wubRoomT || 0) > 0.35) {
+      if (T - (this.wubRoomT || 0) > 0.25) {   // one wave per womp (a womp is never closer than this: closer is the same womp twice)
         this.wubRoomT = T;
-        this.strings.pluck(T, 0.7 * w); this.floor.ripple(T, 0.4 * w); this.director.kick(0.15 * w);
+        this.strings.pluck(T, 0.7 * w); this.floor.ripple(T, 1.1 * w); this.director.kick(0.15 * w);
       }
     }
     if (hv > 0.3 && f.beatHit) this.flash = Math.max(this.flash, 0.22 * hv);
+    // The womp itself, not just its onset: in heavy bass the core breathes with the wobble, swelling as the low end opens and
+    // sinking as it closes (fast enough to ride a wobble of up to ~8 a second, smooth enough never to twitch).
+    this.wobFloor = Math.min(f.low, (this.wobFloor ?? f.low) + dt * 0.6);   // (its own trough: creeps up, snaps down to each dip)
+    this.wob = (this.wob || 0) + (hv * Math.min(1, (f.low - this.wobFloor) * 3) - (this.wob || 0)) * Math.min(1, dt * 16);
+    this.core.uniforms.uWob.value = this.wob; this.floor.uniforms.uWob.value = this.wob;
+    // The whammy: a bass whose pitch dives and climbs (a whammy-bar womp). Where the bass's energy
+    // sits (its centroid, 47-400 Hz) falls as the pitch dives: the liquid void sinks under the core
+    // with it and springs back up as the pitch climbs. Only in heavy bass, never on a quiet line.
+    if (spectrum && spectrum.length > 20) {
+      let w = 0, c = 0;
+      for (let i = 2; i <= 17; i++) { const m = spectrum[i] * spectrum[i]; w += m; c += m * i; }
+      const cen = w > 1e3 ? c / w : this.cenMean || 8;
+      this.cenMean = (this.cenMean ?? cen) + (cen - (this.cenMean ?? cen)) * Math.min(1, dt * 0.8);
+      const goal = hv > 0.3 && f.low > 0.3 ? Math.max(-1, Math.min(1, (cen - this.cenMean) / Math.max(2, this.cenMean) * 4)) * hv : 0;
+      this.bend = (this.bend || 0) + (goal - (this.bend || 0)) * Math.min(1, dt * 9);
+    }
+    this.floor.uniforms.uBend.value = this.bend || 0;
     this._updateSpectrum(spectrum, dt);
 
     // The colour world glides toward the mood (quicker on a drop).
@@ -828,6 +976,9 @@ export class World {
     // sweep turns it once round with the wall.
     const sp = this.show ? this.show.peak : 0;
     this.coreTurn = ((this.coreTurn || 0) + dt * (220 * bld * bld + 70 * sp + 25 * (this.heavy || 0))) % 360;
+    if (f.beatHit) this.beatN = (this.beatN || 0) + 1;
+    this.schemeAmt += ((THEMES[this.theme || 0] === 'scheme' && this.scheme ? 1 : 0) - this.schemeAmt) * Math.min(1, dt * 1.2);
+    this.wordAmt = (this.wordAmt || 0) + (((this.wordUntil || 0) > this.time ? 0.85 : 0) - (this.wordAmt || 0)) * Math.min(1, dt * ((this.wordUntil || 0) > this.time ? 2.2 : 0.9));   // (eases in on the word, lets go slowly)
     this._paint(wallSwing, sweep < 1 ? 360 * (1 - Math.pow(1 - sweep, 3)) : 0);
     this.swell *= Math.exp(-dt * 1.4);
 
@@ -854,7 +1005,7 @@ export class World {
     this.feelMatch = (this.feelMatch || 0) + ((this.feelE === this.moodBase ? 1 : 0) - (this.feelMatch || 0)) * Math.min(1, dt * 3);
     cu.uFeel.value = this.feelAmt * this.feelMatch;   // the part's own feeling, sung: the heart and currents burn brighter
     this._temper(f, dt, cu);
-    cu.uTime.value = T; cu.uLow.value = Math.min(1.3, f.low * (1 + 0.6 * (this.heavy || 0))); cu.uKick.value = Math.min(1.2, Math.pow(Math.min(1, f.kick), this.temper.snap) + 0.5 * this.stab); cu.uMid.value = f.mid; cu.uHigh.value = f.high * (1 + 0.6 * this.scream);
+    cu.uTime.value = T; cu.uLow.value = Math.min(1.3, f.low * (1 + 0.6 * (this.heavy || 0))); cu.uKick.value = Math.min(1.2, Math.pow(Math.min(1, f.kick), this.temper.snap) * (1 - 0.45 * (this.soft || 0)) + 0.5 * this.stab); cu.uMid.value = f.mid; cu.uHigh.value = f.high * (1 + 0.6 * this.scream);
     // The core holds the tension: it swells through a build and a held note and
     // flares when the drop hits.
     // Capped, so it never balloons into the lens (the camera keeps its distance too).
@@ -863,11 +1014,16 @@ export class World {
     // grief and fear shrink it; it grows as the part climbs and each chorus returns,
     // breathes with the bass, and sinks away at the song's end. Eased over seconds,
     // so it grows like a living thing, never pops.
-    const SIZE = { anger: 1.15, defiance: 1.15, joy: 1.1, hope: 1.1, calm: 1.1, mystery: 1.05, love: 1.05, desire: 1.05, nostalgia: 0.95, fear: 0.85, sadness: 0.85, loneliness: 0.75 };
-    const moodSize = this.facets.reduce((s, [e, w]) => s + (SIZE[e] || 1) * w, 0) / Math.max(1e-3, this.facets.reduce((s, [, w]) => s + w, 0));
+    let fW = 0, fSize = 0, fHush = 0;
+    for (const [e, w] of this.facets) { fW += w; fSize += (CORE_SIZE[e] || 1) * w; if (HUSHED.has(e)) fHush += w; }
+    const moodSize = fSize / Math.max(1e-3, fW);
     const sizeGoal = 1.45 * moodSize * (1 + 0.15 * (this.axes.vast || 0) - 0.12 * (this.axes.small || 0)) * (1 + 0.12 * this.arc + 0.1 * this.depth) * (1 - 0.35 * (this.ending || 0));
     this.size = (this.size || sizeGoal) + (sizeGoal - (this.size || sizeGoal)) * Math.min(1, dt * 0.6);
-    const cs = this.size * (1 + 0.1 * f.kick + 0.04 * Math.min(1, f.low)) * (1 + swell);
+    // A hushed song (a sad or lonely part over a kick that doesn't wobble, like a whispered one):
+    // the core breathes with the beat instead of throbbing on it.
+    const hushFeel = fHush / Math.max(1e-3, fW);
+    this.soft = (this.soft ?? 0) + (hushFeel * (1 - smooth(0.44, 0.58, this.bassHold ?? 0.6)) * (1 - this.scream) - (this.soft ?? 0)) * Math.min(1, dt * 0.8);
+    const cs = this.size * (1 + (0.1 * f.kick + 0.04 * Math.min(1, f.low)) * (1 - 0.6 * this.soft)) * (1 + swell) * (1 + 0.24 * this.wob);
     this.core.group.scale.setScalar(cs);
     // A held note stops time in the centre: the core all but stops turning and blooms.
     const still = 1 - 0.85 * this.sustain;
@@ -877,11 +1033,7 @@ export class World {
     // flare wake it part way; at rest it is aware, not off. Eased: it wakes, never snaps.
     const powerGoal = Math.max(this.scream, 0.55 * f.energy * f.energy + 0.35 * this.flare);
     cu.uPower.value += (powerGoal - cu.uPower.value) * Math.min(1, dt * 2);
-    // Its duality: every feeling's second colour, chosen to answer the first (rage's red
-    // against an electric violet, grief's blue against a far gold, ...). Never green.
-    const DUALS = { anger: '#6a3dff', defiance: '#2a7bff', desire: '#5b3dff', love: '#8f5cff', sadness: '#ff4fa0', loneliness: '#ff4f9a',
-      fear: '#ff2050', joy: '#00d4ff', hope: '#ff5fa2', nostalgia: '#7fc8ff', calm: '#a06bff', mystery: '#ff3ca8',
-      powerpoint: '#3b5bff', kawaii: '#7fd8ff', neon: '#ff2a6d' };
+    // Its duality (DUALS, above).
     _dual.set(DUALS[this.moodBase] || '#a06bff');
     cu.uDual.value.lerp(_dual, Math.min(1, dt * 1.5));
     const pair = CORE_PAIRS[this.moodBase] || CORE_PAIRS.mystery, ck = Math.min(1, dt * 1.2);
@@ -890,6 +1042,23 @@ export class World {
     this.core.update(dt, this.scream, f.kick || 0);
 
     this.sky.uniforms.uTime.value = T;
+    this.sky.nebulaStep(dt);
+    // A variant: under the pillars' sky (the third theme) the stars twinkle with the hi-hats.
+    this.hatAvg = (this.hatAvg ?? f.high) + (f.high - (this.hatAvg ?? f.high)) * Math.min(1, dt * 2);
+    const hat = THEME_NEBULA[this.theme || 0] === 2 && f.playing ? Math.max(0, Math.min(1, (f.high - this.hatAvg) * 6)) : 0;
+    this.sky.uniforms.uHat.value += (hat - this.sky.uniforms.uHat.value) * Math.min(1, dt * (hat > this.sky.uniforms.uHat.value ? 30 : 8));
+    // A new instrument coming in (a chills trigger): a band of the spectrum that was quiet for
+    // seconds rises and holds: the room turns to it like it does to the voice.
+    for (const k of ENTRY_BANDS) {
+      const v = f[k], E = this.entry || (this.entry = {}), e = E[k] || (E[k] = { avg: v, hold: 0 });
+      e.hold = v > e.avg + 0.25 && v > 0.35 ? e.hold + dt : 0;
+      e.avg += (v - e.avg) * Math.min(1, dt / 8);
+      if (e.hold > 0.4 && f.playing && !f.jumped && T - (this.entryT ?? -99) > 12 && !f.dropHit && (this.heavy || 0) < 0.5) {
+        this.entryT = T; e.avg = v;
+        if (this.show) { this.show.chaseT = T; this.show.chaseDual = true; }
+        this.floor.ripple(T, 0.7); this.core.notice();
+      }
+    }
     this.sky.uniforms.uEnergy.value = f.energy;
     this.sky.uniforms.uLow.value = Math.min(1.2, Math.max(f.low, this.voice * 0.8));
     this.sky.uniforms.uMid.value = Math.min(1.3, f.mid * (0.7 + 0.6 * this.feature));   // the melody and the voice light the sky
@@ -918,6 +1087,12 @@ export class World {
     fu.uCoreLight.value += (auraGoal - fu.uCoreLight.value) * Math.min(1, dt * 2.5);
     fu.uWallCol.value.copy(this.wallRamps[1][3]);
     fu.uGridFlash.value = Math.max(this.flare * this.flare, this.woke && this.waking < 1 ? 0.8 * Math.sin(Math.PI * this.waking) : 0);   // (the wake lights the whole grid for a breath)
+    // and the grid rises out of it as the song gets loud (level 2+, a build, a drop's reign), sinking back over two bars as
+    // it calms. So the floor answers the song's shape instead of wearing one grid all the way. ?floor=grid or ?floor=mirror
+    // holds one look (grid is the floor as it was).
+    const mGoal = FLOOR_MODE === 'grid' ? 0 : FLOOR_MODE === 'mirror' ? 1
+      : f.playing && (lv >= 2 || bld > 0.3 || this.reigning || this.scream > 0.3) ? 0 : 1;
+    fu.uMirror.value += (mGoal - fu.uMirror.value) * Math.min(1, mGoal < fu.uMirror.value ? dt * (this.flash > 0.5 ? 4 : 1.2) : dt / Math.max(1, 2 * (f.barLen || 2)));
     // Rain that lands: as hard as the song's own rain, and a soft drizzle while nothing
     // plays, so the void is never dead. Drops fall around the camera's side of the room.
     // (the resting drizzle eases off as a song wakes the room and back in as it winds down)
@@ -933,6 +1108,11 @@ export class World {
       const sa = this.R() * Math.PI * 2, sr = 27 + this.R() * 30;
       D[this.dropI = ((this.dropI || 0) + 1) % D.length].set(Math.cos(sa) * sr, Math.sin(sa) * sr, T + this.rain.FALL, 0.5 + this.R() * 0.6);   // it lands once it has fallen
     }
+    // The floor's shader hears only the drops still ringing on it (landed within 1.3 s), packed first.
+    const live = fu.uDropLive.value;
+    let liveN = 0;
+    for (const dp of D) { const age = T - dp.z; if (age >= 0 && age <= 1.3) live[liveN++].copy(dp); }
+    fu.uDropN.value = liveN;
     this.rain.update(T, D, this.palFloor.uAccent.value);
     // Lightning: in a storm (real rain) a drop or a scream cracks the sky, and now and
     // then it strikes on its own. A cold double flicker lights the whole grid.
@@ -956,7 +1136,7 @@ export class World {
     if (_h.h > 0.06 && _h.h < 0.2) S.dual.setHSL(0.93, 1, 0.6, THREE.SRGBColorSpace);   // never gold in the light show: a hot pink instead
     const sc2 = f.section, peakGoal = f.playing && sc2 && sc2.level >= 3 && sc2.energy >= 0.9 && sc2.bars >= 8 && !sc2.drop ? 1 : 0;
     S.peak += (peakGoal - S.peak) * Math.min(1, dt * 1.5);
-    this.ring.update(spectrum || this._silence, dt, this.wallRamps, this.pal.uAccent.value, this.flash, this.wallDim, S);
+    this.ring.update(spectrum || this._silence, dt, this.wallRamps, this.ringAcc, this.flash, this.wallDim, S);
 
     // Camera.
     // What the camera must keep its distance from: the core with its spikes.
@@ -970,7 +1150,7 @@ export class World {
       paceGoal = Math.max(0.4, Math.min(1.5, (PART_PACE[this.part] || 1) * (this.part === 'chorus' ? 1 + 0.3 * this.depth : 1) * feelPace));
     }
     this.camPace = (this.camPace ?? 1) + (paceGoal - (this.camPace ?? 1)) * Math.min(1, dt / Math.max(0.5, f.barLen || 2));
-    this.director.update(dt * (1 - 0.95 * (this.hold || 0)), { build: f.build, level: lv, time: T, coreR, pace: this.camPace });
+    this.director.update(dt * (1 - 0.95 * (this.hold || 0)) * (1 - 0.65 * (this.majestic || 0)) * (1 - 0.5 * (this.antic || 0)), { build: f.build, level: lv, time: T, coreR, pace: this.camPace });
     this.halo.update(T, this.camera, 2.4 * cs);   // rings are born just past the spike tips
     this.sky.mesh.position.copy(this.camera.position);
     const sgu = this.strings.uniforms; sgu.uTime.value = T; sgu.uEnergy.value = f.energy; sgu.uLow.value += (Math.min(1.2, f.low) - sgu.uLow.value) * Math.min(1, dt * 2);   // smoothed: the sway never jitters
@@ -1005,12 +1185,17 @@ export class World {
     // Exposure is part of the mood: quiet feelings are lit low; energy lifts them a little.
     // The breath before the drop: in its last beat the room dims, so the hit lands in light.
     const breath = this.hold > 0 ? 1 - 0.75 * this.hold : f.toDrop < f.beatLen ? 1 - 0.32 * (f.buildWeight ?? 1) * (1 - f.toDrop / f.beatLen) : 1;
-    this.renderer.toneMappingExposure = 1.05 * u.light * (0.9 + 0.2 * a) * breath * (1 + 0.1 * this.feature + 0.1 * this.sustain) * (1 - Math.max(0.6 * this.ending, 0.2 * this.resolve)) * (1 + 0.05 * this.depth);
-    this.post.bloom.strength *= 0.55 + 0.45 * u.light;
+    this.renderer.toneMappingExposure = (1 - 0.22 * (this.antic || 0)) * 1.05 * u.light * (0.9 + 0.2 * a) * breath * (1 + 0.1 * this.feature + 0.1 * this.sustain) * (1 - Math.max(0.6 * this.ending, 0.2 * this.resolve)) * (1 + 0.05 * this.depth);
+    this.post.bloom.strength *= (0.55 + 0.45 * u.light) * (1 + 0.6 * Math.max(0, 1 - ca / 3) * (ca >= 0 ? 1 : 0));   // (a chills moment blooms)
+    // A scream shows the core screaming, not a fog of its glow: the halo pulls in tight and only the brightest edges bloom.
+    this.post.bloom.strength *= 1 - 0.5 * this.scream;
+    this.post.bloom.radius = 0.2 * (1 - 0.6 * this.scream);
+    this.post.bloom.threshold = 0.62 + 0.18 * this.scream;
     this.flash *= Math.exp(-dt * 6.5);
     this.glitch *= Math.exp(-dt * 7);
     if (T >= this.explodeUntil) this.spread *= Math.exp(-dt * 1.6);
     this.core.uniforms.uEnd.value = this.ending;
+    this.sky.bake(this.renderer);
     this.post.render();
   }
 }

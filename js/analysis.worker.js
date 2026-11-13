@@ -9,7 +9,14 @@ self.onmessage = (e) => {
     if (channels.length > 1) {
       mono = new Float32Array(channels[0].length);
       const k = 1 / channels.length;
-      for (const d of channels) for (let i = 0; i < mono.length; i++) mono[i] += d[i] * k;
+      if (channels.length === 2) {
+        // Stereo in one pass; fround keeps the per-channel Float32 rounding of the
+        // general loop below, so the mix is bit-identical.
+        const l = channels[0], r = channels[1];
+        for (let i = 0; i < mono.length; i++) mono[i] = Math.fround(0 + l[i] * k) + r[i] * k;
+      } else {
+        for (const d of channels) for (let i = 0; i < mono.length; i++) mono[i] += d[i] * k;
+      }
     }
     const result = analyze(mono, sampleRate, (p) => self.postMessage({ id, type: 'progress', p }));
     const transfer = [result.beats.buffer, result.downbeats.buffer, result.kicks.buffer, result.onsets.buffer,

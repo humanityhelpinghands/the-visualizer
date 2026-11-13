@@ -85,8 +85,15 @@ export function parseSrt(text) {
 }
 
 export function parseLyrics(text, name = '') {
-  return /\.srt$/i.test(name) || /-->/.test(text) ? parseSrt(text) : parseLrc(text);
+  const out = /\.srt$/i.test(name) || /-->/.test(text) ? parseSrt(text) : parseLrc(text);
+  for (const l of out.lines) {
+    l.text = undash(l.text);
+    if (l.words) l.words = l.words.map((w) => ({ ...w, w: undash(w.w) })).filter((w) => w.w);
+  }
+  return out;
 }
+
+export const undash = (s) => s.replace(/\s*[—–]+\s*(?=\S)/g, ', ').replace(/\s*[—–]+\s*$/g, '').replace(/^,\s*/, '').replace(/,\s*,/g, ',');
 
 // Fill in ends and word timings. `onsets` are detected hits (seconds).
 // A line whose singing end is known stays HOLD seconds after it (so it never

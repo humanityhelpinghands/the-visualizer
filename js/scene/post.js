@@ -18,6 +18,9 @@ const GradeShader = {
     uShadow: { value: new THREE.Vector3(0.1, 0.1, 0.12) }, uHighlight: { value: new THREE.Vector3(1, 1, 1) },
     uSplit: { value: 0.6 }, uSat: { value: 1 }, uContrast: { value: 1 }, uLift: { value: 0.02 }, uSharpen: { value: 0.6 },
     uTexel: { value: new THREE.Vector2(1 / 1920, 1 / 1080) },
+    // Easy on the eyes: where a pixel's brightest channel starts to bend (uKnee) and the ceiling it bends toward (uCeil).
+    //  said that, and the core has its own light now: CORE_LIGHT in js/scene/cores.js. Never lower these to dim the core.)
+    uKnee: { value: 0.6 }, uCeil: { value: 0.84 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -26,7 +29,7 @@ const GradeShader = {
     uniform sampler2D tDiffuse;
     uniform float uTime, uCA, uGrain, uVig, uVigK, uFlash, uGlitch, uScan;
     uniform vec3 uFlashCol, uShadow, uHighlight;
-    uniform float uSplit, uSat, uContrast, uLift, uVibrance, uSharpen;
+    uniform float uSplit, uSat, uContrast, uLift, uVibrance, uSharpen, uKnee, uCeil;
     uniform vec2 uTexel;
     varying vec2 vUv;
     float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
@@ -83,10 +86,65 @@ const GradeShader = {
       col *= 1.0 - uScan * (0.5 + 0.5 * sin(gl_FragCoord.y * 3.14159));
       float vig = smoothstep(0.95, 0.25, length(c) * 1.1 * uVigK);   // fear and loneliness close the dark in; hope opens the frame
       col *= mix(1.0, vig, uVig);                           // edges fall to true black
+      // No mud, the last word: a warm tone that is dark (rust, brown, dark orange) or fully saturated (true
+      // orange, amber) is pulled to red or pink by lowering its green to its blue. Light, glowing warm tones
+      // (peach, salmon, coral) are pretty and pass untouched, and so do pure reds, pinks, greys and cool tones.
+      // (The room's reds lean a few degrees toward orange; when a line glows hot, tone mapping washes it
+      // toward white and that lean shows as peach, which is welcome. Dark, it would show as rust.)
+      {
+        float hi = max(col.r, max(col.g, col.b)), lo = min(col.r, min(col.g, col.b)), span = hi - lo;
+        if (col.r >= col.g && col.g > col.b && span > 0.02) {
+          float lean = smoothstep(0.06, 0.18, (col.g - col.b) / span);   // 0 for a true red, 1 from about 11 degrees up
+          float muddy = max(1.0 - smoothstep(0.5, 0.75, hi), smoothstep(0.6, 0.75, span / hi));   // dark, or too saturated to be peach
+          col.g = mix(col.g, col.b, lean * muddy * smoothstep(0.06, 0.2, span / hi));
+        }
+        // ...and a dark yellow-green (olive) falls to a neutral dark: bright greens are pretty, dark olive is mud.
+        else if (col.g >= col.b && col.r > col.b && col.g > 0.0 && span > 0.02) {
+          float olive = (1.0 - smoothstep(0.3, 0.55, hi)) * smoothstep(0.25, 0.5, span / hi) * smoothstep(0.55, 0.8, min(col.r, col.g) / max(col.r, col.g));
+          col.b = mix(col.b, hi, olive);
+        }
+      }
+      // saturation and awesomeness"). The last word on brightness: a pixel's brightest channel bends toward a ceiling
+      // instead of running on to full white, and the whole pixel is scaled by that same amount, so its hue and its
+      // saturation stay exactly what they were. Under the knee nothing changes, so verses and the dark keep their look.
+      {
+        float hi = max(col.r, max(col.g, col.b));
+        if (hi > uKnee) {
+          float room = max(uCeil - uKnee, 1e-3);
+          col *= (uKnee + room * (1.0 - exp(-(hi - uKnee) / room))) / hi;
+        }
+      }
       col += (hash(gl_FragCoord.xy + fract(uTime) * 97.0) - 0.5) * uGrain;
       gl_FragColor = vec4(max(col, 0.0), 1.0);
     }`,
 };
+
+// A broken value (NaN, or an Inf from light past what a half-float holds) in one pixel is a black
+// hole: the bloom's blur halves the picture five times and smears it into black blocks with
+// output passes through clean(): a broken value becomes black, a huge one stays a bright white.
+const CLEAN = `
+  vec4 clean( vec4 c ) {
+    return min( max( c, vec4( 0.0 ) ), vec4( 6.0e4 ) );   // (max first: on D3D max(NaN, 0) is 0; isnan() there misfires)
+  }
+`;
+
+// The output pass (tone mapping, then sRGB) with the bloom's glow added first, the way the
+// bloom's own additive blend added it (its colour times its alpha): the same picture.
+class GlowOutputPass extends OutputPass {
+  constructor(bloom) {
+    super();
+    this.bloom = bloom;
+    this.uniforms.tGlow = { value: null };
+    this.material.fragmentShader = this.material.fragmentShader
+      .replace('uniform sampler2D tDiffuse;', 'uniform sampler2D tDiffuse, tGlow;')
+      .replace('gl_FragColor = texture2D( tDiffuse, vUv );', 'gl_FragColor = clean( texture2D( tDiffuse, vUv ) ); vec4 glow = clean( texture2D( tGlow, vUv ) ); gl_FragColor.rgb += glow.rgb * glow.a;')
+      .replace('void main() {', CLEAN + 'void main() {');
+  }
+  render(renderer, writeBuffer, readBuffer) {
+    this.uniforms.tGlow.value = this.bloom.renderTargetsHorizontal[0].texture;   // (where the bloom leaves its finished glow)
+    super.render(renderer, writeBuffer, readBuffer);
+  }
+}
 
 export function makePost(renderer, scene, camera) {
   // The scene renders into a 4x multisampled target: every wire and string is an
@@ -106,12 +164,22 @@ export function makePost(renderer, scene, camera) {
   // Tight and coloured: glow hugs bright things instead of fogging the frame (a high
   // threshold and a short radius keep the darks dark, which is half of what makes colour pop).
   const bloom = new UnrealBloomPass(size, 0.8, 0.2, 0.62);
+  // The glow is added in the output pass, never blended back into the multisampled scene buffer:
+  // that wrote every sample of the frame and forced a second resolve, 1.3 ms a frame at ULTRA.
+  const hp = bloom.materialHighPassFilter;   // (the glow's way in: sanitised, so nothing broken spreads)
+  hp.fragmentShader = hp.fragmentShader.replace('void main() {', CLEAN + 'void main() {').replace('texture2D( tDiffuse, vUv )', 'clean( texture2D( tDiffuse, vUv ) )');
+  hp.needsUpdate = true;
+  const quad = bloom._fsQuad || bloom.fsQuad, drawQuad = quad.render.bind(quad);   // (three r171+ named it _fsQuad)
+  quad.render = (r) => { if (quad.material !== bloom.blendMaterial) drawQuad(r); };
   composer.addPass(bloom);
-  composer.addPass(new OutputPass());
+  composer.addPass(new GlowOutputPass(bloom));
   const grade = new ShaderPass(GradeShader);
   composer.addPass(grade);
   // Bloom mips take the mood's halo colour (more so the wider they spread), so
   // light bleeds in hue, like film, never as a milky white veil.
+  // The glow's widest blurs trimmed (stock 1, .8, .6, .4, .2): the tight glow keeps the fiery edge
+  // burning pink to white, but the wide haze no longer spreads a milky film over the core's dark face
+  bloom.compositeMaterial.uniforms.bloomFactors.value = [1.0, 0.8, 0.45, 0.15, 0.04];
   const tints = bloom.compositeMaterial.uniforms.bloomTintColors.value;
   return {
     composer, bloom, lens: grade.uniforms,

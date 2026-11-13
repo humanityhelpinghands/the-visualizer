@@ -132,22 +132,71 @@ function drawLine(g, W, H, line, k, p, look, alpha, rise) {
 // compress it to a JPEG and post it with its number; the server puts them back in
 // order. The page keeps drawing while they work.
 const SENDER = `
-let canvas, g;
-onmessage = async (e) => {
-  const { bitmap, i, url, quality } = e.data;
+let canvas, g, gl, buf;
+// raw (a master): the frame's own RGBA bytes, read into ONE buffer this worker reuses for every frame (fetch copies
+// a body when it is called, so the next frame can overwrite it). Measured 2026-11-05 on a whole song: a Blob per frame
+// was never freed (1.9 MB a frame piled up in the browser's blob store until it crashed near frame 16,000), and a
+// fresh 8 MB array per frame (getImageData) crashed it near frame 1,000.
+function rawPixels(bitmap) {
+  const w = bitmap.width, h = bitmap.height;
+  if (!gl) {
+    gl = new OffscreenCanvas(w, h).getContext('webgl2', { antialias: false, depth: false, premultipliedAlpha: false, preserveDrawingBuffer: false });
+    const tex = gl.createTexture(), fb = gl.createFramebuffer();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);   // (row 0 of the texture is the image's top row, and readPixels returns it first)
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    buf = new Uint8Array(4 + w * h * 4);   // (the frame's number, then its pixels)
+  }
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf.subarray(4));
+  return buf;
+}
+// The raw frames go over one WebSocket (server.py render_socket): an HTTP upload per frame kept each 8 MB copy alive
+// in the page (10 GB by frame 3,600); a socket frees a frame once it is sent. One frame at a time, its reply awaited.
+let ws, replied;
+async function sendRaw(url, i, bitmap) {
+  if (!ws) {
+    ws = new WebSocket('ws' + url.slice(4).replace('/api/render/frame', '/api/render/ws'));
+    ws.binaryType = 'arraybuffer';
+    ws.onmessage = (m) => { const f = replied; replied = null; if (f) f(JSON.parse(m.data)); };
+    await new Promise((ok, no) => { ws.onopen = ok; ws.onerror = () => no(new Error('the frame socket would not open')); });
+    ws.onclose = () => { const f = replied; replied = null; if (f) f({ error: 'the frame socket closed' }); };
+  }
+  const b = rawPixels(bitmap); bitmap.close();
+  new DataView(b.buffer).setUint32(0, i, true);
+  const got = new Promise((ok) => { replied = ok; });
+  ws.send(b);
+  return got;
+}
+// (one frame at a time per worker: the raw buffer is reused, so a frame waits until the one before has been sent,
+// retries included)
+let turn = Promise.resolve();
+onmessage = (e) => { turn = turn.then(() => sendOne(e)); };
+async function sendOne(e) {
+  const { bitmap, i, url, quality, type } = e.data;
   try {
-    if (!canvas) { canvas = new OffscreenCanvas(bitmap.width, bitmap.height); g = canvas.getContext('2d'); }
-    g.drawImage(bitmap, 0, 0); bitmap.close();
-    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
+    let blob;
+    if (type === 'raw') { const r = await sendRaw(url, i, bitmap); postMessage({ i, error: r.error || null }); return; }
+    else {
+      if (!canvas) { canvas = new OffscreenCanvas(bitmap.width, bitmap.height); g = canvas.getContext('2d'); }
+      g.drawImage(bitmap, 0, 0); bitmap.close();
+      blob = await canvas.convertToBlob(type === 'image/png' ? { type } : { type, quality });
+    }
     let r, tries = 0;
     for (;;) {   // a connection the server couldn't take yet is tried again; a refusal is final
       try { r = await fetch(url + '?i=' + i, { method: 'POST', body: blob }); break; }
       catch (err) { if (++tries >= 4) throw err; await new Promise((ok) => setTimeout(ok, 200 * tries)); }
     }
-    postMessage({ i, error: r.ok ? null : (await r.text()) || String(r.status) });
+    // (the reply is always read to its end: an unread one keeps its request, frame and all, alive in the page)
+    const text = await r.text();
+    postMessage({ i, error: r.ok ? null : text || String(r.status) });
   } catch (err) { postMessage({ i, error: String(err) }); }
-};`;
-function makeSenders(n, quality) {
+}`;
+function makeSenders(n, quality, type = 'image/jpeg') {
   const url = URL.createObjectURL(new Blob([SENDER], { type: 'text/javascript' }));
   const workers = Array.from({ length: n }, () => new Worker(url));
   const waiting = new Map();   // frame -> { ok, no }
@@ -163,7 +212,7 @@ function makeSenders(n, quality) {
       while (waiting.size >= maxInFlight) await Promise.race([...waiting.values()].map((p) => p.promise));
       const p = {}; p.promise = new Promise((ok, no) => { p.ok = ok; p.no = no; }); p.promise.catch(() => {});
       waiting.set(i, p);
-      workers[next++ % n].postMessage({ bitmap, i, url: location.origin + '/api/render/frame', quality }, [bitmap]);
+      workers[next++ % n].postMessage({ bitmap, i, url: location.origin + '/api/render/frame', quality, type }, [bitmap]);
     },
     async drain() { while (waiting.size) await Promise.race([...waiting.values()].map((p) => p.promise)); if (failed) throw failed; },
     close() { workers.forEach((w) => w.terminate()); URL.revokeObjectURL(url); },
@@ -243,13 +292,21 @@ export async function renderClip(opts, ctx) {
   if (frames < 1) throw new Error('Nothing to render: `to` must come after `from`.');
   const lyrics = opts.lyrics !== false, textScale = opts.textScale || 1;   // (bigger words read better on a phone)
   const encode = opts.encode !== false, take = Math.max(1, Math.round(opts.take || 1));
+  // master: each frame's raw pixels to a lossless master; the server then makes the X file from it and measures it (server.py x_encode)
+  // ('keep': only the master, for tools/x_encode_study.py)
+  const master = opts.master === 'keep' ? 'keep' : !!opts.master;
   const title = opts.name || track.title || track.name, name = title + (take > 1 ? ` take ${take}` : '');
   const say = opts.onProgress || ((m) => console.info('[loft] render:', m));
   if (encode) {
-    const res = await fetch('/api/render/start', { method: 'POST', body: JSON.stringify({ track: track.url, name, from, to, fps, width: W, height: H }) });
+    const res = await fetch('/api/render/start', { method: 'POST', body: JSON.stringify({ track: track.url, name, from, to, fps, width: W, height: H, master, lean: !!opts.lean }) });
     const job = await res.json();
     if (!res.ok) throw new Error(job.error || `render could not start (${res.status})`);
   }
+  // (everything from here runs inside the try: a throw after ctx.begin() used to leave `rendering` on for good,
+  // and the frame loop returns early while it is, so the whole show froze until the page was reloaded)
+  const stills = [];
+  let senders = null, began = false;
+  try {
   const spectrum = offlineSpectrum(audio.buffer, { fftSize: audio.analyser.fftSize, smoothing: audio.analyser.smoothingTimeConstant, minDb: audio.analyser.minDecibels, maxDb: audio.analyser.maxDecibels });
   const out = document.createElement('canvas');
   out.width = W; out.height = H;
@@ -257,13 +314,13 @@ export async function renderClip(opts, ctx) {
   g.imageSmoothingQuality = 'high';
   const canvas = world.renderer.domElement;
   world.renderSize(W, H, opts.supersample || 1.5);
-  ctx.begin(takeDice(take));
+  ctx.begin(takeDice(take)); began = true;
   let cur = null, prev = null;   // the line on screen and the one leaving: { line, look, at }
-  const senders = encode ? makeSenders(opts.workers || 4, opts.quality || 0.95) : null;
+  senders = encode ? makeSenders(opts.workers || (master ? 6 : 4), opts.quality || 0.95, master ? 'raw' : 'image/jpeg') : null;
   // The stills the sheet wants, by frame: the song's moments now, the camera's cuts
   // as they come. Different kinds of moment within a quarter second of each other are
   // one still (the higher-ranked one's); a drop's breath, hit and flare stay a strip.
-  const want = new Map(), stills = [], near = Math.round(0.25 * fps);
+  const want = new Map(), near = Math.round(0.25 * fps);
   const tw = W >= H ? 480 : 270, th = Math.round((tw * H) / W);
   const ask = (t, kind, label) => {
     const i = Math.min(frames - 1, Math.max(0, Math.round((t - from) * fps)));
@@ -273,7 +330,6 @@ export async function renderClip(opts, ctx) {
   };
   ask(from, 'edge', 'first frame'); ask(to, 'edge', 'last frame');
   for (const m of ctx.moments(from, to)) ask(m.t, m.kind, m.label);
-  try {
     // A run-up, unseen, from the world's clean start (main.js prepare), so the
     // colours, the core and the camera arrive at the first frame already in the song;
     // long enough that what the clean start can't reset (the gliding colours) has
@@ -282,7 +338,8 @@ export async function renderClip(opts, ctx) {
     ctx.prepare(from - pre);
     ctx.step(from - pre, dt, spectrum(from - pre));
     ctx.fresh();
-    for (let t = from - pre + dt; t < from - dt / 2; t += dt) ctx.step(t, dt, spectrum(t));
+    const pace = encode && opts.master ? () => fetch('/api/render/pace', { method: 'POST' }).catch(() => {}) : null;
+    for (let t = from - pre + dt; t < from - dt / 2; t += dt) { if (pace) await pace(); ctx.step(t, dt, spectrum(t)); }
     const started = performance.now();
     let shot = world.director.shot;
     for (let i = 0; i < frames; i++) {
@@ -297,7 +354,10 @@ export async function renderClip(opts, ctx) {
         if (L.line !== (cur && cur.line)) { if (cur) prev = { ...cur, at: t }; cur = L.line ? { line: L.line, look: L.look, at: t } : null; }
         if (cur) cur.look = L.look;
       }
-      if (i % fps === 0) say(`${i} / ${frames} frames (${((performance.now() - started) / 1000).toFixed(0)} s)`);
+      if (i % fps === 0) {
+        const s = (performance.now() - started) / 1000;
+        say(`${i} / ${frames} frames (${s.toFixed(0)} s)`, { step: 'drawing', done: i, of: frames, seconds: s });
+      }
       const still = want.get(i);
       if (!encode && !still) continue;   // (a sheet alone draws only the frames it keeps)
       g.drawImage(canvas, 0, 0, W, H);
@@ -314,6 +374,14 @@ export async function renderClip(opts, ctx) {
       const fin = await fetch('/api/render/finish', { method: 'POST' });
       done = { ...(await fin.json()), take };
       if (!fin.ok) throw new Error(done.error || `render could not finish (${fin.status})`);
+      // A master: the X file encodes and is measured on the server; follow it to the end.
+      while (done.state === 'encoding') {
+        await new Promise((ok) => setTimeout(ok, 1000));
+        const st = await (await fetch('/api/render/status', { method: 'POST' })).json();
+        if (st.state === 'failed') throw new Error(st.error || 'the X file could not be made');
+        say(`${st.step}: ${st.done} / ${st.frames} frames`, { step: st.step, done: st.done, of: st.frames, seconds: Date.now() / 1000 - st.started });
+        if (st.state === 'done') done = { ...st, take };
+      }
     }
     // The sheet. A render whose sheet can't be saved still delivers its clip.
     const kept = pickStills(stills, opts.stills || 24);
@@ -329,7 +397,7 @@ export async function renderClip(opts, ctx) {
   } finally {
     for (const s of stills) s.bitmap.close();
     if (senders) senders.close();
-    ctx.done();
+    if (began) ctx.done();
     world.resize();
   }
 }

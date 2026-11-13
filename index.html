@@ -2,9 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The Loft</title>
-<link rel="icon" href="data:,">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="The Visualizer">
+<title>The Visualizer</title>
+<link rel="icon" href="assets/loft.ico">
+<link rel="preload" href="vendor/fonts/InterTight-var.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="vendor/fonts/fonts.css">
 <link rel="stylesheet" href="css/loft.css">
 <script type="importmap">
@@ -23,10 +28,11 @@
 <div id="caption"></div>
 <div id="title-card"><div id="card-title"></div><div id="card-sub"></div></div>
 
+<div id="fps-alert" aria-live="polite"></div>
 <header id="brand">
-  <span class="logo">THE LOFT</span>
-  <span class="stat" id="stat-bpm">— BPM</span>
-  <span class="stat" id="stat-fps">— FPS</span>
+  <span class="logo">THE VISUALIZER</span>
+  <span class="stat" id="stat-bpm">BPM</span>
+  <span class="stat" id="stat-fps">FPS</span>
 </header>
 
 <div id="empty">
@@ -35,43 +41,49 @@
 </div>
 
 <aside id="drawer">
-  <div class="drawer-head">SONGS <button id="drawer-close" onclick="document.getElementById('drawer').classList.remove('open')" aria-label="Close">×</button></div>
+  <div class="drawer-head"><span>SONGS <span id="song-count"></span></span><button id="drawer-close" onclick="document.getElementById('drawer').classList.remove('open'); document.body.classList.remove('drawer-open')" aria-label="Close the songs" title="Close the songs (Esc)">Back</button></div>
   <input id="track-search" type="search" placeholder="Search songs" autocomplete="off" spellcheck="false" aria-label="Search songs">
+  <button id="up-next" title="Play it now"></button>
   <ol id="track-list"></ol>
+  <div class="drawer-note">Click + to play a song after this one. Click its name to play it now.</div>
   <div id="lyrics-state" class="drawer-note"></div>
   <div class="voice-pick">
     <div class="drawer-sub">VOICE <span id="voice-state"></span></div>
     <div class="voice-row">
       <select id="voice-select" aria-label="Announcer voice"></select>
-      <button id="voice-test" class="pill" title="Hear the voice">HEAR IT</button>
+      <button id="voice-test" title="Hear the voice">Hear it</button>
     </div>
   </div>
-  <div class="keys">
+  <button id="keys-toggle" class="drawer-sub keys-toggle">KEYS <span>?</span></button>
+  <div class="keys" id="keys">
     <div><kbd>Space</kbd> play / pause</div><div><kbd>← →</kbd> seek (shift = 15s)</div>
     <div><kbd>N</kbd> <kbd>P</kbd> next / previous</div><div><kbd>S</kbd> shuffle</div>
-    <div><kbd>T</kbd> lyrics on / off</div><div><kbd>F</kbd> fullscreen</div>
+    <div><kbd>T</kbd> lyrics on / off</div><div><kbd>F</kbd> fullscreen (or double-click)</div>
     <div><kbd>H</kbd> hide everything</div><div><kbd>C</kbd> cut the camera</div>
-    <div><kbd>L</kbd> search songs</div><div><kbd>Esc</kbd> menu / settings</div>
-    <div><kbd>M</kbd> hold to talk to Oasis</div>
+    <div><kbd>L</kbd> search songs</div><div><kbd>Esc</kbd> menu / settings</div><div><kbd>↑ ↓</kbd> volume</div><div><kbd>X</kbd> mark a chill</div><div><kbd>K</kbd> jump to a chill</div>
+    <div><kbd>M</kbd> hold to talk</div><div><kbd>?</kbd> these keys</div><div class="wide"><kbd>0</kbd> to <kbd>9</kbd> jump through the song</div>
   </div>
 </aside>
 
 <footer id="hud">
-  <canvas id="seek" title="Seek. Bright blocks are loud sections, marks are drops."></canvas>
+  <div class="now"><div id="np-title">Nothing playing</div><div class="np-subs"><div id="np-sub">drop a song to begin</div><div id="np-next"></div></div></div>
+  <div class="seek-row"><span id="t-now">0:00</span><div class="seek-wrap"><canvas id="seek" title="Seek. Bright blocks are loud sections, marks are drops."></canvas><div id="seek-tip"></div></div><span id="time">0:00</span></div>
   <div class="row">
+    <div class="tools left">
+      <button id="list-btn" class="key" title="Search songs (L)">Songs<small>(search)</small></button>
+      <button id="shuffle-btn" class="key" title="Shuffle (S)">Shuffle<small class="when-on">(on)</small><small class="when-off">(off)</small></button>
+      <button id="lyrics-btn" class="key" title="Lyrics on screen (T)">Lyrics<small class="when-on">(on)</small><small class="when-off">(off)</small></button>
+    </div>
     <div class="transport">
       <button id="prev" aria-label="Previous"><svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
       <button id="play" aria-label="Play or pause"><svg class="i-play" viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg><svg class="i-pause" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg></button>
       <button id="next" aria-label="Next"><svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
     </div>
-    <div class="now"><div id="np-title">Nothing playing</div><div id="np-sub">drop a song to begin</div></div>
-    <div id="time">0:00 / 0:00</div>
     <div class="tools">
-      <button id="shuffle-btn" class="pill" title="Shuffle (S)">SHUFFLE</button>
-      <button id="lyrics-btn" class="pill" title="Lyrics on screen (T)">LYRICS</button>
-      <input id="vol" type="range" min="0" max="1" step="0.01" value="0.9" aria-label="Volume">
-      <button id="list-btn" class="pill" title="Search songs (L)">SONGS</button>
-      <button id="fs-btn" aria-label="Fullscreen (F)"><svg viewBox="0 0 24 24"><path d="M4 4h6v2H6v4H4zm10 0h6v6h-2V6h-4zM4 14h2v4h4v2H4zm14 0h2v6h-6v-2h4z"/></svg></button>
+      <input id="vol" type="range" min="0" max="1" step="0.01" value="0.9" aria-label="Volume (up / down arrows, or scroll)"><span id="vol-pct">90</span>
+      <button id="x-btn" class="key" title="Make this whole song into a video for X, in the background, at full quality">For X<small>(full)</small></button>
+      <button id="xfast-btn" class="key" title="Make a quicker video for X: 30 frames a second and a little softer, about an eighth of the drawing">Fast<small>(for X)</small></button>
+      <button id="fs-btn" class="key" aria-label="Full screen" title="Full screen"><svg viewBox="0 0 24 24"><path class="fs-out" d="M4 4h6v2H6v4H4zm10 0h6v6h-2V6h-4zM4 14h2v4h4v2H4zm14 0h2v6h-6v-2h4z"/><path class="fs-in" d="M8 4h2v6H4V8h4zm6 0h2v4h4v2h-6zM4 14h6v6H8v-4H4zm10 0h6v2h-4v4h-2z"/></svg></button>
     </div>
   </div>
 </footer>
@@ -80,13 +92,43 @@
 <div id="drop-hint"><div>DROP SONGS + LYRICS</div></div>
 <div id="toasts"></div>
 
-<div id="gate">
+<div id="gate" class="loading">
   <div class="gate-inner">
-    <div class="hint">begin</div>
+    <div class="hint" id="gate-hint">loading</div>
+    <div class="track"><i></i></div>
     <div class="count" id="gate-count">tuning in…</div>
   </div>
 </div>
+<script>
+// The wait before the room can begin, said honestly: a guess in seconds (how long this device took last time; the first
+// time, the 3 MB of code over this connection plus a few seconds to build the room), a clock counting toward it, and
+// at a bare "loading" for over a minute with no way to tell slow from frozen.
+(() => {
+  const gate = document.getElementById('gate'), count = document.getElementById('gate-count'), bar = gate.querySelector('.track i'), t0 = performance.now();
+  let guess = 0, stuck = false;
+  try { guess = Math.round((+localStorage.getItem('loft.bootMs') || 0) / 1000); } catch { /* no memory on this device */ }
+  if (!guess) guess = Math.min(40, Math.max(6, Math.round(5 + 25 / ((navigator.connection && navigator.connection.downlink) || 10))));
+  guess = Math.max(2, guess);
+  const tick = () => {
+    if (!gate.classList.contains('loading')) {
+      clearInterval(timer);
+      try { localStorage.setItem('loft.bootMs', Math.round(performance.now() - t0)); } catch { /* not remembered */ }
+      return;
+    }
+    const s = (performance.now() - t0) / 1000, sec = Math.floor(s), step = gate.dataset.step || 'getting the room';
+    stuck = s > Math.max(30, guess * 3);
+    count.textContent = stuck ? 'stuck on ' + step + ' for ' + sec + ' seconds: tap to reload'
+      : s > guess ? step + ': ' + sec + ' seconds, longer than the usual ' + guess
+      : step + ': ' + sec + ' of about ' + guess + ' seconds';
+    bar.style.animation = s > guess ? '' : 'none';
+    bar.style.transformOrigin = 'left'; bar.style.transform = s > guess ? '' : 'scaleX(' + (s / guess).toFixed(3) + ')';
+  };
+  const timer = setInterval(tick, 200); tick();
+  gate.addEventListener('click', () => { if (stuck && gate.classList.contains('loading')) location.reload(); });
+})();
+</script>
 
+<script src="js/bgmode.js"></script>
 <script type="module" src="js/main.js"></script>
 <script type="module" src="js/oasis/talk-loft.js"></script>
 </body>

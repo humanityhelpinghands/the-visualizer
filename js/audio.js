@@ -7,7 +7,12 @@ export class AudioEngine {
     this.ctx = new AudioContext({ latencyHint: 'interactive' });
     this.duck = this.ctx.createGain();
     this.master = this.ctx.createGain();
-    this.duck.connect(this.master).connect(this.ctx.destination);
+    // Stream mode (?stream, a hidden window drawing for a phone): the sound goes only to the phone, never the PC's speakers.
+    this.streaming = new URLSearchParams(location.search).has('stream');
+    if (this.streaming) { this.streamOut = this.ctx.createMediaStreamDestination(); this.duck.connect(this.master).connect(this.streamOut); }
+    else this.duck.connect(this.master).connect(this.ctx.destination);
+    this.silent = location.port === '8040' || location.port === '8041';
+    if (this.silent) this.master.gain.value = 0;
     // Analyser taps the raw song, so volume and voice ducking never dim the visuals.
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = 2048;
@@ -30,6 +35,8 @@ export class AudioEngine {
     this.onEnded = null;
     this._smooth = 0;
     this._lastPerf = 0;
+    //  its files are in archive/ceiling-2026-11-12. A song plays at the volume slider's level.)
+    this.songGain = 1;
   }
 
   async decode(arrayBuffer) {
@@ -45,17 +52,20 @@ export class AudioEngine {
 
   get duration() { return this.buffer ? this.buffer.duration : 0; }
 
-  async play(offset = this.pausedAt) {
+  // a seek, a skip or a pause fades the old sound out while the new one fades in (fadeIn seconds).
+  async play(offset = this.pausedAt, fadeIn = 0.12) {
     if (!this.buffer) return;
     if (this.ctx.state !== 'running') await this.ctx.resume();
-    this._kill();
-    const src = this.ctx.createBufferSource();
+    this._kill(0.15);
+    const src = this.ctx.createBufferSource(), g = this.ctx.createGain();
     src.buffer = this.buffer;
-    src.connect(this.duck);
+    src.connect(g).connect(this.duck);
     src.connect(this.analyser);
     offset = Math.max(0, Math.min(offset, this.buffer.duration - 0.01));
     const when = this.ctx.currentTime + 0.03;
+    g.gain.setValueAtTime(0, when); g.gain.linearRampToValueAtTime(Math.min(1, this.songGain), when + Math.max(0.01, fadeIn));
     src.start(when, offset);
+    this.srcGain = g;
     this.startedAt = when - offset;
     this.source = src;
     this.playing = true;
@@ -72,12 +82,13 @@ export class AudioEngine {
   pause() {
     if (!this.playing) return;
     this.pausedAt = this.rawTime();
-    this._kill();
+    this._kill(0.15);
     this.playing = false;
   }
 
-  stop() {
-    this._kill();
+  // fade: how long the old song takes to fade away (a skip's crossfade; a song's end hands over slower).
+  stop(fade = 0.5) {
+    this._kill(fade);
     this.playing = false;
     this.pausedAt = 0;
   }
@@ -88,16 +99,23 @@ export class AudioEngine {
     else { this.pausedAt = t; this._smooth = t; }
   }
 
-  _kill() {
+  _kill(fade = 0) {
     if (!this.source) return;
-    const s = this.source;
-    this.source = null;
+    const s = this.source, g = this.srcGain, now = this.ctx.currentTime;
+    this.source = null; this.srcGain = null;
     s.onended = null;
+    try { s.disconnect(this.analyser); } catch { /* already apart */ }   // the visuals follow the new sound at once
+    if (fade > 0 && g) {   // it fades out on its own, then lets go
+      g.gain.cancelScheduledValues(now); g.gain.setValueAtTime(g.gain.value, now); g.gain.linearRampToValueAtTime(0, now + fade);
+      try { s.stop(now + fade + 0.02); } catch { /* never started */ }
+      s.onended = () => { s.disconnect(); g.disconnect(); };
+      return;
+    }
     try { s.stop(); } catch (err) {
       // A source that never started cannot stop; that is the only expected case.
       if (err.name !== 'InvalidStateError') throw err;
     }
-    s.disconnect();
+    s.disconnect(); if (g) g.disconnect();
   }
 
   // Song time at the audio thread's cursor (ahead of the speakers).
@@ -155,7 +173,7 @@ export class AudioEngine {
     return Math.min(1, Math.sqrt(s / this._vwave.length) * 4);
   }
 
-  setVolume(v) { this.master.gain.setTargetAtTime(v, this.ctx.currentTime, 0.03); }
+  setVolume(v) { if (this.silent) return; this.master.gain.setTargetAtTime(v, this.ctx.currentTime, 0.03); }
 
   setDuck(on) {
     this.duck.gain.cancelScheduledValues(this.ctx.currentTime);
